@@ -1,0 +1,9 @@
+build*/
+cmake-build-*/
+/results/
+__pycache__/
+*.pyc
+.DS_Store
+.idea/
+bench/slurm/site.env
+bench/slurm/logs/

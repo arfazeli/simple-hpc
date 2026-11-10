@@ -1,0 +1,3 @@
+tag,grid,threads,repeat,iters,total_seconds,seconds_per_iter,cell_updates_per_s,assemble_u,bc_u,residual_u,sweep_u,assemble_v,bc_v,residual_v,sweep_v,assemble_p,solve_p,correct,output,cpu,compiler,git_hash,converged,cg_iters_mean
+gpu_t23_26745839,512,8,1,20,0.021997000,0.001099850,2.383452e+08,0.003909937,0.000250890,0.000679106,0.005423689,0.000624419,0.000262458,0.000656225,0.005719898,0.000991906,0.002958264,0.000495759,0.382776862,AMD Instinct MI300A Accelerator,GNU 12.3.1,unknown,False,0.0
+gpu_t23_26745839,2048,8,1,20,0.169499000,0.008474950,4.949060e+08,0.007012868,0.000357392,0.003840941,0.054544428,0.004256901,0.000338025,0.003805756,0.057126882,0.004633675,0.031167767,0.002392092,4.429946715,AMD Instinct MI300A Accelerator,GNU 12.3.1,unknown,False,0.0

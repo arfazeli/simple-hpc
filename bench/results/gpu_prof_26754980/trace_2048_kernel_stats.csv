@@ -1,0 +1,17 @@
+"Name","Calls","TotalDurationNs","AverageNs","Percentage","MinNs","MaxNs","StdDev"
+"(anonymous namespace)::k_sweep_v((anonymous namespace)::DP, (anonymous namespace)::DC, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::Range, int)",400,58049781,145124.452500,35.17,130318,188846,5486.874773
+"(anonymous namespace)::k_sweep_u((anonymous namespace)::DP, (anonymous namespace)::DC, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::Range, int)",400,54617753,136544.382500,33.09,127112,140573,2066.256473
+"(anonymous namespace)::k_pc_redblack((anonymous namespace)::DPW, (anonymous namespace)::Range, int)",320,30217840,94430.750000,18.31,92260,97588,868.095953
+"(anonymous namespace)::k_assemble_u((anonymous namespace)::DP, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::DC, (anonymous namespace)::Range)",20,4155252,207762.600000,2.52,176027,538015,78222.235069
+"(anonymous namespace)::k_assemble_v((anonymous namespace)::DP, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::DC, (anonymous namespace)::Range)",20,3991968,199598.400000,2.42,168816,214806,9970.073670
+"(anonymous namespace)::k_residual_v((anonymous namespace)::DP, (anonymous namespace)::DC, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::Range, double*)",20,2743238,137161.900000,1.66,128996,141374,2433.990635
+"(anonymous namespace)::k_residual_u((anonymous namespace)::DP, (anonymous namespace)::DC, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::Range, double*)",20,2670529,133526.450000,1.62,131239,136207,1192.772951
+"(anonymous namespace)::k_correct((anonymous namespace)::DP, (anonymous namespace)::DPW, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::Range)",20,2123778,106188.900000,1.29,104359,110167,1693.181120
+"(anonymous namespace)::k_finish(double const*, int, double*)",60,2051944,34199.066667,1.24,22074,39139,2557.665149
+"(anonymous namespace)::k_p_rhs((anonymous namespace)::DP, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::DPW, (anonymous namespace)::Range, double*)",20,1827730,91386.500000,1.11,90377,92420,601.469122
+"(anonymous namespace)::k_p_links((anonymous namespace)::DP, (anonymous namespace)::DF, (anonymous namespace)::DF, (anonymous namespace)::DPW, (anonymous namespace)::Range)",20,1454280,72714.000000,0.8811,70627,76957,1856.325743
+"__amd_rocclr_fillBufferAligned",40,518943,12973.575000,0.3144,5688,21112,6871.695431
+"__amd_rocclr_copyBuffer",60,291038,4850.633333,0.1763,3645,6730,570.273558
+"(anonymous namespace)::k_p_zero((anonymous namespace)::DP, (anonymous namespace)::DPW)",20,128072,6403.600000,0.0776,5969,6850,229.753965
+"(anonymous namespace)::k_bc_v((anonymous namespace)::DP, (anonymous namespace)::DF)",20,125108,6255.400000,0.0758,4887,7411,674.307707
+"(anonymous namespace)::k_bc_u((anonymous namespace)::DP, (anonymous namespace)::DF)",20,94463,4723.150000,0.0572,3966,5288,351.594305
