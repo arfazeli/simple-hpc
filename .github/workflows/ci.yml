@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [{ cc: gcc, cxx: g++ }, { cc: clang, cxx: clang++ }]
+    name: ubuntu / ${{ matrix.compiler.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenMP runtime for clang and numpy
+        run: sudo apt-get update && sudo apt-get install -y libomp-dev python3-numpy
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=${{ matrix.compiler.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.compiler.cxx }}
+      - name: Build
+        run: cmake --build build -j
+      - name: Test (fast set; Ghia validation excluded)
+        run: OMP_NUM_THREADS=2 ctest --test-dir build -LE ghia --output-on-failure
