@@ -1,5 +1,6 @@
 #include "simple/solver.hpp"
 
+#include "simple/decomp.hpp"
 #include "simple/momentum_u.hpp"
 #include "simple/momentum_v.hpp"
 
@@ -7,10 +8,15 @@
 #include <chrono>
 #include <cstdio>
 
+// Every array holds this rank's slab: rows [alloc_row0, alloc_row0 + R) with global indices
+// (the whole grid when there is one rank).
+static int slab_rows(const Params& p) { return p.alloc_rows > 0 ? p.alloc_rows : p.nrows; }
+
 State::State(const Params& p)
-    : u(p.nrows, p.ncols), v(p.nrows, p.ncols), p(p.nrows, p.ncols), cu(p.nrows, p.ncols),
-      cv(p.nrows, p.ncols), pw(p.nrows, p.ncols), scratch(p.nrows, p.ncols),
-      cg(p.nrows, p.ncols),
+    : u(slab_rows(p), p.ncols, 0.0, p.alloc_row0), v(slab_rows(p), p.ncols, 0.0, p.alloc_row0),
+      p(slab_rows(p), p.ncols, 0.0, p.alloc_row0), cu(slab_rows(p), p.ncols, p.alloc_row0),
+      cv(slab_rows(p), p.ncols, p.alloc_row0), pw(slab_rows(p), p.ncols, p.alloc_row0),
+      scratch(slab_rows(p), p.ncols, 0.0, p.alloc_row0), cg(slab_rows(p), p.ncols, p.alloc_row0),
       mg(p.pressure_solver == PressureSolver::MG ? MGWork(p) : MGWork()) {}
 
 Residuals outer_iteration(const Params& p, State& s, PhaseTimers& t) {
@@ -36,6 +42,7 @@ Residuals outer_iteration(const Params& p, State& s, PhaseTimers& t) {
         {
             ScopedTimer st(t, Phase::AssembleV);
             assemble_v(p, s.u, s.v, s.cv);
+            halo_exchange(p, s.cv.AP); // assemble_p reads APV(i + 1, j)
         }
         {
             ScopedTimer st(t, Phase::BcV);
@@ -68,6 +75,12 @@ Residuals outer_iteration(const Params& p, State& s, PhaseTimers& t) {
     {
         ScopedTimer st(t, Phase::Correct);
         correct(p, s.pw, s.cu.AP, s.cv.AP, s.u, s.v, s.p);
+        // MPI: the next iteration's assembly reads u, v (i +- 1) and p (i - 1) across slabs. The
+        // sweeps refresh u, v and p' halos after every colour; the boundary-condition rows are
+        // never in another rank's halo (decompose keeps >= H rows per rank).
+        halo_exchange(p, s.u);
+        halo_exchange(p, s.v);
+        halo_exchange(p, s.p);
     }
     return r;
 }
@@ -91,7 +104,7 @@ RunResult run_outer_loop(const Params& p, const std::function<Residuals(PhaseTim
         Residuals r = step(out.timers);
         out.log.push_back({static_cast<double>(iter), r.u, r.v, r.p});
         out.iterations = iter;
-        if (iter == 1 || iter % 100 == 0)
+        if (p.rank == 0 && (iter == 1 || iter % 100 == 0))
             std::printf("iter %d  res_u %.6e  res_v %.6e  res_p %.6e\n", iter, r.u, r.v, r.p);
         double tu = r.u, tv = r.v, tp = r.p;
         if (p.residual_normalisation == ResidualNorm::RunningMax) {

@@ -164,6 +164,6 @@ In `output_dir`:
 
 ## 7. Floating-point reproducibility
 
-Results are bit-reproducible only if expressions keep the operation order given above: residual and sweep sums are `(near4) + (far4) + pressure term`, evaluated left to right; sums accumulate in loop order (`i` descending, `j` ascending) into a `double` starting at `0.0`; coefficient arrays are allocated once and entries outside the assembly ranges stay 0.
+Results are bit-reproducible only if expressions keep the operation order given above: residual and sweep sums are `(near4) + (far4) + pressure term`, evaluated left to right; the residuals `res_u`, `res_v`, `res_p` are summed per row (`j` ascending, into a `double` starting at `0.0`), and the row sums are then added in ascending global row index `i`, so they are the same bits for any thread or MPI rank count; coefficient arrays are allocated once and entries outside the assembly ranges stay 0.
 
 `simple_core` builds with `-ffp-contract=off`. Apple clang fuses `a*b + c` by default, which shifts results by about 1e-12 on tiny values and would break the snapshot tests.

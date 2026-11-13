@@ -10,6 +10,7 @@ endif()
 
 option(SIMPLE_OPENMP "Enable OpenMP for the independent kernels" ON)
 option(SIMPLE_HIP "Build the HIP GPU backend (T23; needs ROCm)" OFF)
+option(SIMPLE_MPI "Build with MPI (row-slab domain decomposition)" OFF)
 
 execute_process(COMMAND git rev-parse --short HEAD
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -43,6 +44,12 @@ endif()
 add_executable(simple src/main.cpp)
 target_link_libraries(simple PRIVATE simple_core)
 
+if(SIMPLE_MPI)
+  find_package(MPI REQUIRED COMPONENTS CXX)
+  target_link_libraries(simple_core PUBLIC MPI::MPI_CXX)
+  target_compile_definitions(simple_core PUBLIC SIMPLE_MPI)
+endif()
+
 if(SIMPLE_HIP)
   if(NOT DEFINED CMAKE_HIP_ARCHITECTURES)
     set(CMAKE_HIP_ARCHITECTURES gfx942) # MI300A
@@ -72,8 +79,9 @@ target_link_libraries(simple_tests PRIVATE simple_core Catch2::Catch2WithMain)
 target_include_directories(simple_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 target_compile_definitions(simple_tests PRIVATE SIMPLE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 include(Catch)
-# Residual reductions change summation order with >1 thread; the snapshot test compares residuals
-# exactly, so tests run with one thread by default (test_threads.cpp sets its own counts).
+# Momentum and p' residuals are fixed-order row sums (same bits for any thread count), but the cg
+# dot products are OpenMP reductions, so tests run with one thread by default (test_threads.cpp
+# sets its own counts).
 catch_discover_tests(simple_tests PROPERTIES ENVIRONMENT OMP_NUM_THREADS=1 SKIP_RETURN_CODE 4)
 
 # Ghia validation runs: slow, labelled "ghia" (ctest -LE ghia skips them). Each test runs the
@@ -117,6 +125,19 @@ if(Python3_FOUND AND NOT numpy_missing)
                 momentum_solver=gs_multicolour pressure_solver=mg)
   add_ghia_test(ghia_re1000_80_mg 1000 0.025 0.015
                 momentum_solver=gs_multicolour pressure_solver=mg)
+endif()
+
+if(SIMPLE_MPI)
+  # u, v, p on N ranks must be byte-identical to one rank (tests/mpi/test_mpi_slab.cpp).
+  add_executable(simple_mpi_tests ${CMAKE_SOURCE_DIR}/tests/mpi/test_mpi_slab.cpp)
+  target_link_libraries(simple_mpi_tests PRIVATE simple_core)
+  foreach(n 1 2 3 4)
+    add_test(NAME mpi_slab_n${n}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${n} ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:simple_mpi_tests> ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(mpi_slab_n${n} PROPERTIES LABELS mpi ENVIRONMENT OMP_NUM_THREADS=1
+                         PROCESSORS ${n})
+  endforeach()
 endif()
 
 if(SIMPLE_HIP)

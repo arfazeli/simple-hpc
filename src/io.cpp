@@ -40,19 +40,19 @@ static std::string esc(const std::string& s) {
     return o;
 }
 
-void write_outputs(const Params& p, const State& s, const RunResult& r,
-                   const std::string& cfg_path) {
+void write_outputs(const Params& p, const Field2D& u, const Field2D& v, const Field2D& pf,
+                   const RunResult& r, const std::string& cfg_path) {
     namespace fs = std::filesystem;
     PhaseTimers timers = r.timers;
     const fs::path d(p.output_dir);
     {
     ScopedTimer out_timer(timers, Phase::Output);
     fs::create_directories(p.output_dir);
-    write_csv((d / "u.csv").string(), s.u);
-    write_csv((d / "v.csv").string(), s.v);
-    write_csv((d / "p.csv").string(), s.p);
+    write_csv((d / "u.csv").string(), u);
+    write_csv((d / "v.csv").string(), v);
+    write_csv((d / "p.csv").string(), pf);
     Field2D ux, uy;
-    cell_centre(p, s.u, s.v, ux, uy);
+    cell_centre(p, u, v, ux, uy);
     write_csv((d / "ux_centre.csv").string(), ux);
     write_csv((d / "uy_centre.csv").string(), uy);
 

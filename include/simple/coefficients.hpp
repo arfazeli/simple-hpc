@@ -18,6 +18,6 @@ Coef9 diffusive_coefficients(const Params& p, int i, int j);
 struct Coeffs {
     Field2D AE, AW, AN, AS, AEE, AWW, ANN, ASS, AP;
     Coeffs() = default;
-    Coeffs(int rows, int cols);
+    Coeffs(int rows, int cols, int row0 = 0);
     void set(int i, int j, const Coef9& c);
 };

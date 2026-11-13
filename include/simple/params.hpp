@@ -1,6 +1,8 @@
 #pragma once
 #include "simple/config.hpp"
 
+#include <algorithm>
+#include <climits>
 #include <ostream>
 #include <string>
 
@@ -34,7 +36,17 @@ struct Params {
     // derived
     int nrows = 0, ncols = 0;
     double dx = 0.0, dy = 0.0, nu = 0.0;
+    // MPI slab decomposition (set by decompose(), decomp.hpp). Defaults = one rank owning all rows,
+    // so serial callers that never call decompose() are unaffected.
+    int rank = 0, nranks = 1;
+    int row_lo = 0, row_hi = INT_MAX;   // global rows this rank computes (inclusive)
+    int alloc_row0 = 0, alloc_rows = 0; // stored rows: owned plus H halo rows (0 = all nrows)
 };
+
+// Clamp a kernel's global row range [a, b] to the rows this rank owns.
+inline int row_from(const Params& p, int a) { return std::max(a, p.row_lo); }
+inline int row_to(const Params& p, int b) { return std::min(b, p.row_hi); }
+inline bool owns_row(const Params& p, int i) { return i >= p.row_lo && i <= p.row_hi; }
 
 Params make_params(const ConfigMap& cfg);
 void print_params(std::ostream& os, const Params& p);

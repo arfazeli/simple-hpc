@@ -7,7 +7,7 @@
 struct PressureWork {
     Field2D AEP, AWP, ANP, ASP, APP, b, pc;
     PressureWork() = default;
-    PressureWork(int rows, int cols);
+    PressureWork(int rows, int cols, int row0 = 0);
 };
 
 // SPEC 3.7 steps 1-3. Returns res_p.
@@ -34,7 +34,7 @@ struct CGWork {
     double last_mean_removed = 0.0;         // mean of the iterate before the final mean removal
     std::vector<double>* history = nullptr; // if set, ||r||/||b|| per iteration (index 0: 1.0)
     CGWork() = default;
-    CGWork(int rows, int cols);
+    CGWork(int rows, int cols, int row0 = 0);
 };
 
 // p' = A^+ b by Jacobi-preconditioned CG, matrix-free over interior cells, where
