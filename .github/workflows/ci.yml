@@ -23,3 +23,18 @@ jobs:
         run: cmake --build build -j
       - name: Test (fast set; Ghia validation excluded)
         run: OMP_NUM_THREADS=2 ctest --test-dir build -LE ghia --output-on-failure
+
+  mpi:
+    runs-on: ubuntu-latest
+    name: ubuntu / g++ + Open MPI
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Open MPI and numpy
+        run: sudo apt-get update && sudo apt-get install -y libopenmpi-dev openmpi-bin python3-numpy
+      - name: Configure (MPI + OpenMP)
+        # --oversubscribe: the MPI tests start up to 4 ranks, more than the runner may report as slots.
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSIMPLE_MPI=ON -DMPIEXEC_PREFLAGS=--oversubscribe
+      - name: Build
+        run: cmake --build build -j
+      - name: Test (fast set + MPI byte-identity on 1-4 ranks)
+        run: OMP_NUM_THREADS=2 ctest --test-dir build -LE ghia --output-on-failure
