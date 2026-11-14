@@ -8,15 +8,20 @@
 #include <chrono>
 #include <cstdio>
 
-// Every array holds this rank's slab: rows [alloc_row0, alloc_row0 + R) with global indices
-// (the whole grid when there is one rank).
-static int slab_rows(const Params& p) { return p.alloc_rows > 0 ? p.alloc_rows : p.nrows; }
+// Every array holds this rank's block: rows [alloc_row0, alloc_row0 + R) x columns
+// [alloc_col0, alloc_col0 + C) with global indices (the whole grid when there is one rank).
+static int blk_rows(const Params& p) { return p.alloc_rows > 0 ? p.alloc_rows : p.nrows; }
+static int blk_cols(const Params& p) { return p.alloc_cols > 0 ? p.alloc_cols : p.ncols; }
 
 State::State(const Params& p)
-    : u(slab_rows(p), p.ncols, 0.0, p.alloc_row0), v(slab_rows(p), p.ncols, 0.0, p.alloc_row0),
-      p(slab_rows(p), p.ncols, 0.0, p.alloc_row0), cu(slab_rows(p), p.ncols, p.alloc_row0),
-      cv(slab_rows(p), p.ncols, p.alloc_row0), pw(slab_rows(p), p.ncols, p.alloc_row0),
-      scratch(slab_rows(p), p.ncols, 0.0, p.alloc_row0), cg(slab_rows(p), p.ncols, p.alloc_row0),
+    : u(blk_rows(p), blk_cols(p), 0.0, p.alloc_row0, p.alloc_col0),
+      v(blk_rows(p), blk_cols(p), 0.0, p.alloc_row0, p.alloc_col0),
+      p(blk_rows(p), blk_cols(p), 0.0, p.alloc_row0, p.alloc_col0),
+      cu(blk_rows(p), blk_cols(p), p.alloc_row0, p.alloc_col0),
+      cv(blk_rows(p), blk_cols(p), p.alloc_row0, p.alloc_col0),
+      pw(blk_rows(p), blk_cols(p), p.alloc_row0, p.alloc_col0),
+      scratch(blk_rows(p), blk_cols(p), 0.0, p.alloc_row0, p.alloc_col0),
+      cg(blk_rows(p), blk_cols(p), p.alloc_row0, p.alloc_col0),
       mg(p.pressure_solver == PressureSolver::MG ? MGWork(p) : MGWork()) {}
 
 Residuals outer_iteration(const Params& p, State& s, PhaseTimers& t) {
@@ -26,6 +31,8 @@ Residuals outer_iteration(const Params& p, State& s, PhaseTimers& t) {
         {
             ScopedTimer st(t, Phase::AssembleU);
             assemble_u(p, s.u, s.v, s.cu);
+            if (p.grid_cols > 1)
+                halo_exchange(p, s.cu.AP); // assemble_p reads APU(i, j - 1)
         }
         {
             ScopedTimer st(t, Phase::BcU);
@@ -75,9 +82,9 @@ Residuals outer_iteration(const Params& p, State& s, PhaseTimers& t) {
     {
         ScopedTimer st(t, Phase::Correct);
         correct(p, s.pw, s.cu.AP, s.cv.AP, s.u, s.v, s.p);
-        // MPI: the next iteration's assembly reads u, v (i +- 1) and p (i - 1) across slabs. The
-        // sweeps refresh u, v and p' halos after every colour; the boundary-condition rows are
-        // never in another rank's halo (decompose keeps >= H rows per rank).
+        // MPI: the next iteration's assembly reads u, v and p across blocks (corners included).
+        // The sweeps refresh u, v and p' halos after every colour; the boundary-condition rows
+        // and columns are never in another rank's halo (decompose keeps >= H of each per rank).
         halo_exchange(p, s.u);
         halo_exchange(p, s.v);
         halo_exchange(p, s.p);

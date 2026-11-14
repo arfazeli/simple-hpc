@@ -62,10 +62,12 @@ Coef9 diffusive_coefficients(const Params& p, int i, int j) {
     return c;
 }
 
-Coeffs::Coeffs(int rows, int cols, int row0)
-    : AE(rows, cols, 0.0, row0), AW(rows, cols, 0.0, row0), AN(rows, cols, 0.0, row0),
-      AS(rows, cols, 0.0, row0), AEE(rows, cols, 0.0, row0), AWW(rows, cols, 0.0, row0),
-      ANN(rows, cols, 0.0, row0), ASS(rows, cols, 0.0, row0), AP(rows, cols, 0.0, row0) {}
+Coeffs::Coeffs(int rows, int cols, int row0, int col0)
+    : AE(rows, cols, 0.0, row0, col0), AW(rows, cols, 0.0, row0, col0),
+      AN(rows, cols, 0.0, row0, col0), AS(rows, cols, 0.0, row0, col0),
+      AEE(rows, cols, 0.0, row0, col0), AWW(rows, cols, 0.0, row0, col0),
+      ANN(rows, cols, 0.0, row0, col0), ASS(rows, cols, 0.0, row0, col0),
+      AP(rows, cols, 0.0, row0, col0) {}
 
 void Coeffs::set(int i, int j, const Coef9& c) {
     AE(i, j) = c.AE;

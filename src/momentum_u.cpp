@@ -9,7 +9,7 @@ void assemble_u(const Params& p, const Field2D& u, const Field2D& v, Coeffs& cu)
     const int H = p.H;
 #pragma omp parallel for schedule(static)
     for (int i = row_to(p, p.NX + H - 1); i >= row_from(p, H); --i) {
-        for (int j = H; j <= p.NY + H; ++j) {
+        for (int j = col_from(p, H); j <= col_to(p, p.NY + H); ++j) {
             double ue = (u(i, j) + u(i, j + 1)) / 2;
             double uw = (u(i, j) + u(i, j - 1)) / 2;
             double vn = (v(i, j) + v(i, j + 1)) / 2;
@@ -24,12 +24,12 @@ void assemble_u(const Params& p, const Field2D& u, const Field2D& v, Coeffs& cu)
 void apply_bc_u(const Params& p, Field2D& u) {
     const int H = p.H;
     // O(N) loops run serially: a team start costs more than the work (T33).
-    if (owns_row(p, H - 1)) // the lid row and the first interior row belong to rank 0
-        for (int j = H + 1; j <= p.NY + H; ++j)
+    if (owns_row(p, H - 1)) // the lid row and the first interior row belong to grid row 0
+        for (int j = col_from(p, H + 1); j <= col_to(p, p.NY + H); ++j)
             u(H - 1, j) = 2 - u(H, j);
     // South ghost row u[NX+H, j] mirrors the first interior row.
     if (owns_row(p, p.NX + H))
-        for (int j = H + 1; j <= p.NY + H; ++j)
+        for (int j = col_from(p, H + 1); j <= col_to(p, p.NY + H); ++j)
             u(p.NX + H, j) = -u(p.NX + H - 1, j);
 }
 
@@ -42,18 +42,20 @@ static inline double nb_sum(const Coeffs& c, const Field2D& u, int i, int j) {
 
 double residual_u(const Params& p, const Coeffs& cu, const Field2D& u, const Field2D& pf) {
     const int H = p.H;
-    std::vector<double> rows(p.nrows, 0.0); // row sums, added in row order by sum_rows
+    CellSums cs(p, H, p.NX + H - 1, H + 1, p.NY + H - 1); // added in serial order by sum()
 #pragma omp parallel for schedule(static)
-    for (int i = row_to(p, p.NX + H - 1); i >= row_from(p, H); --i) {
-        double res = 0.0;
-        for (int j = H + 1; j <= p.NY + H - 1; ++j) {
+    for (int i = cs.ib; i >= cs.ia; --i) {
+        double res = 0.0, *c = cs.cells(i);
+        for (int j = cs.ja; j <= cs.jb; ++j) {
             double R =
                 nb_sum(cu, u, i, j) + (pf(i, j) - pf(i, j + 1)) * p.dy - cu.AP(i, j) * u(i, j);
             res += std::fabs(R);
+            if (c)
+                c[j - cs.ja] = std::fabs(R);
         }
-        rows[i] = res;
+        cs.row(i, res);
     }
-    return sum_rows(p, rows);
+    return cs.sum(p);
 }
 
 void sweep_u_gs_lex(const Params& p, const Coeffs& cu, Field2D& u, const Field2D& pf) {
@@ -88,7 +90,7 @@ void sweep_u_jacobi_batch(const Params& p, const Coeffs& cu, Field2D& u, const F
                           Field2D& old, int nsweeps) {
     if (nsweeps <= 0)
         return;
-    const int H = p.H, r0 = u.row0(), r1 = u.row0() + u.rows(), cols = u.cols();
+    const int H = p.H, r0 = u.row0(), r1 = u.row0() + u.rows(), c0 = u.col0(), c1 = c0 + u.cols();
     const double a = p.relaxation_factor_u;
     // One team for the whole batch (T33). One full copy (halo included); passes never write the
     // halo, so both buffers keep it. Buffers then alternate (T32); each thread derives src/dst
@@ -97,7 +99,7 @@ void sweep_u_jacobi_batch(const Params& p, const Coeffs& cu, Field2D& u, const F
     {
 #pragma omp for schedule(static)
         for (int i = r0; i < r1; ++i)
-            for (int j = 0; j < cols; ++j)
+            for (int j = c0; j < c1; ++j)
                 old(i, j) = u(i, j);
         for (int k = 0; k < nsweeps; ++k) {
             const bool to_u = (nsweeps - k) % 2 == 1;
@@ -120,7 +122,8 @@ void sweep_u_jacobi(const Params& p, const Coeffs& cu, Field2D& u, const Field2D
 
 void sweep_u_multicolour_batch(const Params& p, const Coeffs& cu, Field2D& u, const Field2D& pf,
                                int nsweeps) {
-    const int H = p.H, ncol = momentum_colours(p), jmin = H + 1, jmax = p.NY + H - 1;
+    const int H = p.H, ncol = momentum_colours(p), jmin = col_from(p, H + 1),
+              jmax = col_to(p, p.NY + H - 1);
     const double a = p.relaxation_factor_u;
 #pragma omp parallel // one team for all sweeps and colours (T33)
     for (int k = 0; k < nsweeps; ++k)
@@ -132,7 +135,7 @@ void sweep_u_multicolour_batch(const Params& p, const Coeffs& cu, Field2D& u, co
                     u(i, j) = a * (nb + (pf(i, j) - pf(i, j + 1)) * p.dy) / cu.AP(i, j) +
                               (1 - a) * u(i, j);
                 }
-            // MPI: the next colour reads this colour's cells in the neighbours' halo rows. The
+            // MPI: the next colour reads this colour's cells in the neighbours' halos. The
             // omp for ended with a barrier; the master exchanges, then everyone waits for it.
             if (p.nranks > 1) {
 #pragma omp master

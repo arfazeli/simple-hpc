@@ -35,7 +35,7 @@ if ! cmake --build build-mpi -j "$SLURM_CPUS_PER_TASK" > build-mpi.log 2>&1; the
     echo "BUILD FAILED"; exit 1
 fi
 
-step "fast tests (mpi_slab_n1..4 run on this node via mpiexec)"
+step "fast tests (mpi_decomp_n1..4 run on this node via mpiexec)"
 ctest --test-dir build-mpi -LE ghia 2>&1 | grep -E 'tests passed|Failed|\*\*\*'
 
 # Across nodes with srun; each line ends in "fields byte-identical; residual log identical".

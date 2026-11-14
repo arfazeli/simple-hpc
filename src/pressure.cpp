@@ -2,12 +2,14 @@
 
 #include "simple/decomp.hpp"
 
+#include <algorithm>
 #include <cmath>
 
-PressureWork::PressureWork(int rows, int cols, int row0)
-    : AEP(rows, cols, 0.0, row0), AWP(rows, cols, 0.0, row0), ANP(rows, cols, 0.0, row0),
-      ASP(rows, cols, 0.0, row0), APP(rows, cols, 0.0, row0), b(rows, cols, 0.0, row0),
-      pc(rows, cols, 0.0, row0) {}
+PressureWork::PressureWork(int rows, int cols, int row0, int col0)
+    : AEP(rows, cols, 0.0, row0, col0), AWP(rows, cols, 0.0, row0, col0),
+      ANP(rows, cols, 0.0, row0, col0), ASP(rows, cols, 0.0, row0, col0),
+      APP(rows, cols, 0.0, row0, col0), b(rows, cols, 0.0, row0, col0),
+      pc(rows, cols, 0.0, row0, col0) {}
 
 double assemble_p(const Params& p, const Field2D& APU, const Field2D& APV, const Field2D& u,
                   const Field2D& v, PressureWork& w) {
@@ -15,34 +17,40 @@ double assemble_p(const Params& p, const Field2D& APU, const Field2D& APV, const
     const double dx = p.dx, dy = p.dy;
 #pragma omp parallel for schedule(static)
     for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-        for (int j = H + 1; j <= NY + H; ++j) {
+        for (int j = col_from(p, H + 1); j <= col_to(p, NY + H); ++j) {
             w.AEP(i, j) = dy * dy / APU(i, j);
             w.AWP(i, j) = dy * dy / APU(i, j - 1);
             w.ANP(i, j) = dx * dx / APV(i, j);
             w.ASP(i, j) = dx * dx / APV(i + 1, j);
         }
-    for (int i = row_from(p, 0); i <= row_to(p, p.nrows - 1); ++i) {
-        w.AWP(i, H + 1) = 0.0;
-        w.AEP(i, NY + H) = 0.0;
+    const int r0 = row_from(p, 0), r1 = row_to(p, p.nrows - 1);
+    const int c0 = col_from(p, 0), c1 = col_to(p, p.ncols - 1);
+    for (int i = r0; i <= r1; ++i) {
+        if (owns_col(p, H + 1))
+            w.AWP(i, H + 1) = 0.0;
+        if (owns_col(p, NY + H))
+            w.AEP(i, NY + H) = 0.0;
     }
     if (owns_row(p, NX + H - 1))
-        for (int j = 0; j < p.ncols; ++j)
+        for (int j = c0; j <= c1; ++j)
             w.ASP(NX + H - 1, j) = 0.0;
     if (owns_row(p, H))
-        for (int j = 0; j < p.ncols; ++j)
+        for (int j = c0; j <= c1; ++j)
             w.ANP(H, j) = 0.0;
-    std::vector<double> rows(p.nrows, 0.0); // row sums, added in row order by sum_rows
+    CellSums cs(p, H, NX + H - 1, H + 1, NY + H); // added in serial order by sum()
 #pragma omp parallel for schedule(static)
-    for (int i = row_to(p, NX + H - 1); i >= row_from(p, H); --i) {
-        double res = 0.0;
-        for (int j = H + 1; j <= NY + H; ++j) {
+    for (int i = cs.ib; i >= cs.ia; --i) {
+        double res = 0.0, *c = cs.cells(i);
+        for (int j = cs.ja; j <= cs.jb; ++j) {
             w.APP(i, j) = w.AEP(i, j) + w.AWP(i, j) + w.ANP(i, j) + w.ASP(i, j);
             w.b(i, j) = -dx * (-v(i + 1, j) + v(i, j)) - dy * (-u(i, j - 1) + u(i, j));
             res += std::fabs(w.b(i, j));
+            if (c)
+                c[j - cs.ja] = std::fabs(w.b(i, j));
         }
-        rows[i] = res;
+        cs.row(i, res);
     }
-    return sum_rows(p, rows);
+    return cs.sum(p);
 }
 
 void solve_pc_gs_lex(const Params& p, PressureWork& w) {
@@ -68,7 +76,7 @@ static inline void pc_update(PressureWork& w, const Field2D& src, int i, int j) 
 
 void solve_pc_jacobi(const Params& p, PressureWork& w, Field2D& old) {
     const int H = p.H, NX = p.NX, NY = p.NY, r0 = w.pc.row0(), r1 = w.pc.row0() + w.pc.rows(),
-              cols = w.pc.cols();
+              c0 = w.pc.col0(), c1 = c0 + w.pc.cols();
     const int n = p.maxit_inner_p;
     w.pc.fill(0.0);
     // T32: one copy, then the two buffers alternate. Halo cells are never written, so both stay 0
@@ -77,7 +85,7 @@ void solve_pc_jacobi(const Params& p, PressureWork& w, Field2D& old) {
     {
 #pragma omp for schedule(static)
         for (int i = r0; i < r1; ++i)
-            for (int j = 0; j < cols; ++j)
+            for (int j = c0; j < c1; ++j)
                 old(i, j) = w.pc(i, j);
         for (int k = 0; k < n; ++k) {
             const bool to_pc = (n - k) % 2 == 1; // pass k writes w.pc iff an odd count remains
@@ -97,16 +105,19 @@ void solve_pc_jacobi(const Params& p, PressureWork& w, Field2D& old) {
 }
 
 void solve_pc_redblack(const Params& p, PressureWork& w) {
-    const int H = p.H, NX = p.NX, NY = p.NY;
+    const int H = p.H, NX = p.NX, jmin = col_from(p, H + 1), jmax = col_to(p, p.NY + H);
     w.pc.fill(0.0);
 #pragma omp parallel
     for (int k = 0; k < p.maxit_inner_p; ++k)
         for (int c = 0; c < 2; ++c) {
 #pragma omp for schedule(static)
-            for (int i = row_to(p, NX + H - 1); i >= row_from(p, H); --i)
-                for (int j = H + 1 + ((i + H + 1 + c) & 1); j <= NY + H; j += 2)
+            for (int i = row_to(p, NX + H - 1); i >= row_from(p, H); --i) {
+                int j = H + 1 + ((i + H + 1 + c) & 1);    // first cell of colour c in the row
+                j += (std::max(0, jmin - j) + 1) / 2 * 2; // first one in this rank's columns
+                for (; j <= jmax; j += 2)
                     pc_update(w, w.pc, i, j);
-            // MPI: the other colour (and correct) reads these cells in the neighbours' halo rows.
+            }
+            // MPI: the other colour (and correct) reads these cells in the neighbours' halos.
             // The omp for ended with a barrier; the master exchanges, then everyone waits for it.
             if (p.nranks > 1) {
 #pragma omp master
@@ -126,24 +137,24 @@ void correct(const Params& p, const PressureWork& w, const Field2D& APU, const F
     {
 #pragma omp for schedule(static) nowait
         for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-            for (int j = H + 1; j <= NY + H - 1; ++j)
+            for (int j = col_from(p, H + 1); j <= col_to(p, NY + H - 1); ++j)
                 u(i, j) += dy * (w.pc(i, j) - w.pc(i, j + 1)) / APU(i, j);
 #pragma omp for schedule(static) nowait
         for (int i = row_from(p, H + 1); i <= row_to(p, NX + H - 1); ++i)
-            for (int j = H + 1; j <= NY + H; ++j)
+            for (int j = col_from(p, H + 1); j <= col_to(p, NY + H); ++j)
                 v(i, j) += p.dx * (w.pc(i, j) - w.pc(i - 1, j)) / APV(i, j);
 #pragma omp for schedule(static)
         for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-            for (int j = H + 1; j <= NY + H; ++j)
+            for (int j = col_from(p, H + 1); j <= col_to(p, NY + H); ++j)
                 p_field(i, j) += ap * w.pc(i, j);
     }
 }
 
 // ---- Conjugate gradient (pressure_solver = cg) ----
 
-CGWork::CGWork(int rows, int cols, int row0)
-    : r(rows, cols, 0.0, row0), z(rows, cols, 0.0, row0), d(rows, cols, 0.0, row0),
-      q(rows, cols, 0.0, row0) {}
+CGWork::CGWork(int rows, int cols, int row0, int col0)
+    : r(rows, cols, 0.0, row0, col0), z(rows, cols, 0.0, row0, col0),
+      d(rows, cols, 0.0, row0, col0), q(rows, cols, 0.0, row0, col0) {}
 
 void apply_A_p(const Params& p, const PressureWork& w, const Field2D& x, Field2D& out) {
     const int H = p.H, NX = p.NX, NY = p.NY;

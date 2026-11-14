@@ -10,7 +10,7 @@ endif()
 
 option(SIMPLE_OPENMP "Enable OpenMP for the independent kernels" ON)
 option(SIMPLE_HIP "Build the HIP GPU backend (T23; needs ROCm)" OFF)
-option(SIMPLE_MPI "Build with MPI (row-slab domain decomposition)" OFF)
+option(SIMPLE_MPI "Build with MPI (2D block domain decomposition)" OFF)
 
 execute_process(COMMAND git rev-parse --short HEAD
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -128,14 +128,14 @@ if(Python3_FOUND AND NOT numpy_missing)
 endif()
 
 if(SIMPLE_MPI)
-  # u, v, p on N ranks must be byte-identical to one rank (tests/mpi/test_mpi_slab.cpp).
-  add_executable(simple_mpi_tests ${CMAKE_SOURCE_DIR}/tests/mpi/test_mpi_slab.cpp)
+  # u, v, p on N ranks, every process grid shape, must be byte-identical to one rank.
+  add_executable(simple_mpi_tests ${CMAKE_SOURCE_DIR}/tests/mpi/test_mpi_decomp.cpp)
   target_link_libraries(simple_mpi_tests PRIVATE simple_core)
   foreach(n 1 2 3 4)
-    add_test(NAME mpi_slab_n${n}
+    add_test(NAME mpi_decomp_n${n}
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${n} ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:simple_mpi_tests> ${MPIEXEC_POSTFLAGS})
-    set_tests_properties(mpi_slab_n${n} PROPERTIES LABELS mpi ENVIRONMENT OMP_NUM_THREADS=1
+    set_tests_properties(mpi_decomp_n${n} PROPERTIES LABELS mpi ENVIRONMENT OMP_NUM_THREADS=1
                          PROCESSORS ${n})
   endforeach()
 endif()

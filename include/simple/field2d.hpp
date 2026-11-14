@@ -36,10 +36,12 @@ inline void first_touch_fill(double* d, int rows, int cols, double v) {
 class Field2D {
   public:
     Field2D() = default;
-    // Stores global rows [row0, row0 + rows); indices stay global, so a rank's slab of the grid
-    // (owned rows plus halo rows, see decomp.hpp) is addressed exactly like the full grid.
-    Field2D(int rows, int cols, double init = 0.0, int row0 = 0)
-        : rows_(rows), cols_(cols), row0_(row0), d_(static_cast<std::size_t>(rows) * cols) {
+    // Stores global rows [row0, row0 + rows) x columns [col0, col0 + cols); indices stay global,
+    // so a rank's block of the grid (owned cells plus halo, see decomp.hpp) is addressed exactly
+    // like the full grid.
+    Field2D(int rows, int cols, double init = 0.0, int row0 = 0, int col0 = 0)
+        : rows_(rows), cols_(cols), row0_(row0), col0_(col0),
+          d_(static_cast<std::size_t>(rows) * cols) {
         first_touch_fill(d_.data(), rows, cols, init);
     }
 
@@ -47,16 +49,17 @@ class Field2D {
     double operator()(int i, int j) const { return d_[idx(i, j)]; }
     int rows() const { return rows_; } // stored rows (the slab), not the global row count
     int row0() const { return row0_; } // first stored global row
-    int cols() const { return cols_; }
+    int col0() const { return col0_; } // first stored global column
+    int cols() const { return cols_; } // stored columns
     double* data() { return d_.data(); }
     const double* data() const { return d_.data(); }
     void fill(double v) { d_.assign(d_.size(), v); }
 
   private:
     std::size_t idx(int i, int j) const {
-        assert(i >= row0_ && i < row0_ + rows_ && j >= 0 && j < cols_);
-        return static_cast<std::size_t>(i - row0_) * cols_ + j;
+        assert(i >= row0_ && i < row0_ + rows_ && j >= col0_ && j < col0_ + cols_);
+        return static_cast<std::size_t>(i - row0_) * cols_ + (j - col0_);
     }
-    int rows_ = 0, cols_ = 0, row0_ = 0;
+    int rows_ = 0, cols_ = 0, row0_ = 0, col0_ = 0;
     std::vector<double, NoInitAlloc<double>> d_;
 };

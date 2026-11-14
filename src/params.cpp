@@ -55,7 +55,8 @@ Params make_params(const ConfigMap& cfg) {
         "relaxation_factor_v", "relaxation_factor_p", "convection_scheme",
         "diffusion_order",  "Hybrid_switch",   "backend",
         "momentum_solver",  "pressure_solver", "output_dir", "residual_normalisation",
-        "pressure_tolerance", "pressure_maxit", "mg_cycles", "mg_pre", "mg_post", "mg_omega"};
+        "pressure_tolerance", "pressure_maxit", "mg_cycles", "mg_pre", "mg_post", "mg_omega",
+        "mpi_grid"};
     for (auto& kv : cfg)
         if (!known.count(kv.first))
             throw std::runtime_error("unknown config key: " + kv.first);
@@ -133,6 +134,15 @@ Params make_params(const ConfigMap& cfg) {
             p.mg_post = to_int(k, v);
         else if (k == "mg_omega")
             p.mg_omega = to_double(k, v);
+        else if (k == "mpi_grid" && v != "auto") { // RxC, e.g. 2x2
+            const std::size_t x = v.find('x');
+            if (x == std::string::npos)
+                throw std::runtime_error("mpi_grid must be auto or RxC (e.g. 2x2): " + v);
+            p.grid_rows_cfg = to_int(k, v.substr(0, x));
+            p.grid_cols_cfg = to_int(k, v.substr(x + 1));
+            if (p.grid_rows_cfg < 1 || p.grid_cols_cfg < 1)
+                throw std::runtime_error("mpi_grid sizes must be positive: " + v);
+        }
     }
 
     if (p.N_halo_x != p.N_halo_y)

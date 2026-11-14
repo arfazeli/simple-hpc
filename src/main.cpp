@@ -51,9 +51,9 @@ int main(int argc, char** argv) {
             } else { // rank 0 gathers the three output fields (only rank 0 allocates them)
                 const int rows = rank == 0 ? global.nrows : 0;
                 Field2D u(rows, global.ncols), v(rows, global.ncols), pf(rows, global.ncols);
-                gather_rows(p, s.u, u);
-                gather_rows(p, s.v, v);
-                gather_rows(p, s.p, pf);
+                gather_field(p, s.u, u);
+                gather_field(p, s.v, v);
+                gather_field(p, s.p, pf);
                 if (rank == 0)
                     write_outputs(global, u, v, pf, r, argv[1]);
             }

@@ -1,5 +1,6 @@
 // MPI regression: a run on N ranks gives u, v, p byte-identical to the one-rank run, the same
-// residual history digit for digit, and stops at the same iteration.
+// residual history digit for digit, and stops at the same iteration, for every process grid
+// shape R x C with R * C = N (slabs N x 1, columns 1 x N, and blocks such as 2 x 2).
 // Run as `mpiexec -n N simple_mpi_tests`; exit code 0 on success on every rank.
 #include "simple/decomp.hpp"
 #include "simple/solver.hpp"
@@ -34,9 +35,9 @@ bool check(const std::string& name, const std::string& extra, int rank, int nran
 
     const int rows = rank == 0 ? global.nrows : 0;
     Field2D u(rows, global.ncols), v(rows, global.ncols), pf(rows, global.ncols);
-    gather_rows(p, s.u, u);
-    gather_rows(p, s.v, v);
-    gather_rows(p, s.p, pf);
+    gather_field(p, s.u, u);
+    gather_field(p, s.v, v);
+    gather_field(p, s.p, pf);
     if (rank != 0)
         return true;
 
@@ -44,8 +45,9 @@ bool check(const std::string& name, const std::string& extra, int rank, int nran
     const RunResult rr = run_simple(global, ref);
     const bool fields = same(u, ref.u) && same(v, ref.v) && same(pf, ref.p);
     const bool log = r.iterations == rr.iterations && r.log == rr.log; // exact == on doubles
-    std::printf("%s on %d ranks: %d iterations; fields %s; residual log %s\n", name.c_str(), nranks,
-                r.iterations, fields ? "byte-identical" : "DIFFER", log ? "identical" : "DIFFERS");
+    std::printf("%s on %dx%d ranks: %d iterations; fields %s; residual log %s\n", name.c_str(),
+                p.grid_rows, p.grid_cols, r.iterations, fields ? "byte-identical" : "DIFFER",
+                log ? "identical" : "DIFFERS");
     return fields && log;
 }
 
@@ -59,15 +61,22 @@ int main(int argc, char** argv) {
     // Fixed work (tolerance never reached), both colourings.
     const std::string fixed = "Re = 1000\nmaxit = 300\nerror_tolerance = 1e-300\n";
     int ok = 1;
-    ok &= check("QUICK/4 (5 colours), 300 its",
-                fixed + "convection_scheme = QUICK\ndiffusion_order = 4\n", rank, nranks);
-    ok &= check("UDS/2 (2 colours), 300 its",
-                fixed + "convection_scheme = UDS\ndiffusion_order = 2\n", rank, nranks);
-    // Run to convergence: the stopping test sees the same residual bits on every rank count.
-    ok &= check("Re 400 to convergence",
-                "Re = 400\nmaxit = 20000\nerror_tolerance = 1e-4\n"
-                "residual_normalisation = running_max\n",
-                rank, nranks);
+    for (int r = 1; r <= nranks; ++r) {
+        if (nranks % r != 0)
+            continue;
+        const std::string grid =
+            "mpi_grid = " + std::to_string(r) + "x" + std::to_string(nranks / r) + "\n";
+        ok &=
+            check("QUICK/4 (5 colours), 300 its",
+                  grid + fixed + "convection_scheme = QUICK\ndiffusion_order = 4\n", rank, nranks);
+        ok &= check("UDS/2 (2 colours), 300 its",
+                    grid + fixed + "convection_scheme = UDS\ndiffusion_order = 2\n", rank, nranks);
+        // Run to convergence: the stopping test sees the same residual bits on every grid.
+        ok &= check("Re 400 to convergence",
+                    grid + "Re = 400\nmaxit = 20000\nerror_tolerance = 1e-4\n"
+                           "residual_normalisation = running_max\n",
+                    rank, nranks);
+    }
     MPI_Bcast(&ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Finalize();
     return ok ? 0 : 1;

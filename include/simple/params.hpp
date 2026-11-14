@@ -36,17 +36,26 @@ struct Params {
     // derived
     int nrows = 0, ncols = 0;
     double dx = 0.0, dy = 0.0, nu = 0.0;
-    // MPI slab decomposition (set by decompose(), decomp.hpp). Defaults = one rank owning all rows,
-    // so serial callers that never call decompose() are unaffected.
+    // MPI process grid (config mpi_grid = auto | RxC, 0 = auto).
+    int grid_rows_cfg = 0, grid_cols_cfg = 0;
+    // MPI block decomposition (set by decompose(), decomp.hpp). Defaults = one rank owning the
+    // whole grid, so serial callers that never call decompose() are unaffected.
     int rank = 0, nranks = 1;
+    int grid_rows = 1, grid_cols = 1;   // process grid Pr x Pc; rank = grid_i * Pc + grid_j
+    int grid_i = 0, grid_j = 0;         // this rank's position in it
     int row_lo = 0, row_hi = INT_MAX;   // global rows this rank computes (inclusive)
+    int col_lo = 0, col_hi = INT_MAX;   // global columns this rank computes (inclusive)
     int alloc_row0 = 0, alloc_rows = 0; // stored rows: owned plus H halo rows (0 = all nrows)
+    int alloc_col0 = 0, alloc_cols = 0; // stored columns: owned plus H halo (0 = all ncols)
 };
 
-// Clamp a kernel's global row range [a, b] to the rows this rank owns.
+// Clamp a kernel's global row / column range [a, b] to the cells this rank owns.
 inline int row_from(const Params& p, int a) { return std::max(a, p.row_lo); }
 inline int row_to(const Params& p, int b) { return std::min(b, p.row_hi); }
 inline bool owns_row(const Params& p, int i) { return i >= p.row_lo && i <= p.row_hi; }
+inline int col_from(const Params& p, int a) { return std::max(a, p.col_lo); }
+inline int col_to(const Params& p, int b) { return std::min(b, p.col_hi); }
+inline bool owns_col(const Params& p, int j) { return j >= p.col_lo && j <= p.col_hi; }
 
 Params make_params(const ConfigMap& cfg);
 void print_params(std::ostream& os, const Params& p);
