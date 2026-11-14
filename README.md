@@ -9,7 +9,7 @@ A C++17 finite-volume SIMPLE solver for the 2D lid-driven cavity, parallelised w
 
 ![Strong scaling on 32 cores](docs/figures/performance/hpc/cpu_scaling.png)
 
-Details and all figures: [`docs/RESULTS.md`](docs/RESULTS.md). Numerical method: [`docs/SPEC.md`](docs/SPEC.md).
+Case study: [arfazeli.github.io/simple-hpc.html](https://arfazeli.github.io/simple-hpc.html). Details and all figures: [`docs/RESULTS.md`](docs/RESULTS.md). Numerical method: [`docs/SPEC.md`](docs/SPEC.md).
 
 ## Build and test
 
