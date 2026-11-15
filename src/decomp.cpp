@@ -1,7 +1,11 @@
 #include "simple/decomp.hpp"
 
+#include "simple/multigrid.hpp"
+
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -11,20 +15,48 @@
 #endif
 
 // Part k of `parts` of an index range [0, total) whose interior is n indices starting at `first`:
-// interior indices are split as evenly as possible (the first n % parts parts get one more), the
+// interior indices are split in units of `unit` (n % unit == 0) as evenly as possible (the first
+// (n / unit) % parts parts get one unit more), the
 // first part also owns [0, first) and the last part everything after the interior. At least H
 // interior indices per part keeps every halo inside the neighbour's owned cells and the
 // boundary-condition rows (H-1, NX+H) and columns (H, NY+H+1) out of other ranks' halos.
-static void split(int n, int first, int total, int parts, int k, int& lo, int& hi) {
-    const int base = n / parts, extra = n % parts;
-    auto start = [&](int m) { return first + m * base + std::min(m, extra); };
+static void split(int n, int first, int total, int parts, int k, int unit, int& lo, int& hi) {
+    const int base = n / unit / parts, extra = n / unit % parts;
+    auto start = [&](int m) { return first + unit * (m * base + std::min(m, extra)); };
     lo = k == 0 ? 0 : start(k);
     hi = k == parts - 1 ? total - 1 : start(k + 1) - 1;
 }
 
 void owned_block(const Params& p, int r, int& rlo, int& rhi, int& clo, int& chi) {
-    split(p.NX, p.H, p.nrows, p.grid_rows, r / p.grid_cols, rlo, rhi);
-    split(p.NY, p.H + 1, p.ncols, p.grid_cols, r % p.grid_cols, clo, chi);
+    const int unit = 1 << p.mg_split;
+    split(p.NX, p.H, p.nrows, p.grid_rows, r / p.grid_cols, unit, rlo, rhi);
+    split(p.NY, p.H + 1, p.ncols, p.grid_cols, r % p.grid_cols, unit, clo, chi);
+}
+
+void interior_block(const Params& p, int r, int& I0, int& nI, int& J0, int& nJ) {
+    int rlo = 0, rhi = 0, clo = 0, chi = 0;
+    owned_block(p, r, rlo, rhi, clo, chi);
+    I0 = std::max(rlo, p.H) - p.H;
+    nI = std::min(rhi, p.NX + p.H - 1) - p.H - I0 + 1;
+    J0 = std::max(clo, p.H + 1) - p.H - 1;
+    nJ = std::min(chi, p.NY + p.H) - p.H - 1 - J0 + 1;
+}
+
+// Decomposed MG levels for a pr x pc grid: the largest D >= 1 such that every rank owns at least
+// one 2^D unit in each direction, at least H level-0 cells, and at least kMgAggMin cells per side
+// on level D-1. 0 if there is none. ponytail: a larger D means coarser units, so up to one unit of
+// level-0 imbalance (e.g. 48/48/32 rows of 128 on 3 ranks); cap D if that shows in the timings.
+constexpr int kMgAggMin = 4;
+static int mg_split_levels(const Params& p, int pr, int pc) {
+    const int nl = static_cast<int>(mg_level_dims(p.NX, p.NY).size());
+    int best = 0;
+    for (int d = 1; d < nl; ++d) {
+        const int ur = (p.NX >> d) / pr, uc = (p.NY >> d) / pc; // fewest units on a rank
+        if (ur >= 1 && uc >= 1 && (ur << d) >= p.H && (uc << d) >= p.H && 2 * ur >= kMgAggMin &&
+            2 * uc >= kMgAggMin)
+            best = d;
+    }
+    return best;
 }
 
 void decompose(Params& p, int rank, int nranks) {
@@ -33,9 +65,10 @@ void decompose(Params& p, int rank, int nranks) {
                                  std::to_string(nranks));
     if (nranks > 1) {
         if (p.momentum_solver != MomentumSolver::GsMulticolour ||
-            p.pressure_solver != PressureSolver::GsRedBlack || p.backend == Backend::GPU)
+            p.pressure_solver == PressureSolver::GsLex || p.backend == Backend::GPU)
             throw std::runtime_error("more than one MPI rank needs momentum_solver = "
-                                     "gs_multicolour and pressure_solver = gs_redblack on the CPU");
+                                     "gs_multicolour, a pressure_solver other than gs_lex, and "
+                                     "the CPU backend");
     }
     const int H = p.H;
     auto fits = [&](int pr, int pc) { return p.NX / pr >= H && p.NY / pc >= H; };
@@ -69,6 +102,17 @@ void decompose(Params& p, int rank, int nranks) {
                                  " interior rows or columns per rank (grid " +
                                  std::to_string(p.NX) + " x " + std::to_string(p.NY) + ")");
     }
+    p.mg_split = 0;
+    if (nranks > 1 && p.pressure_solver == PressureSolver::MG) {
+        p.mg_split = mg_split_levels(p, pr, pc);
+        if (p.mg_split == 0)
+            throw std::runtime_error(
+                "decompose: pressure_solver = mg needs two multigrid levels "
+                "and " +
+                std::to_string(kMgAggMin / 2) + " coarse cells per rank on each side (grid " +
+                std::to_string(p.NX) + " x " + std::to_string(p.NY) + ", process grid " +
+                std::to_string(pr) + "x" + std::to_string(pc) + ")");
+    }
     p.rank = rank;
     p.nranks = nranks;
     p.grid_rows = pr;
@@ -91,50 +135,55 @@ static double* cell_buffer(std::size_t n) {
     return buf.data();
 }
 
-CellSums::CellSums(const Params& p, int ia_, int ib_, int ja_, int jb_)
-    : ia(row_from(p, ia_)), ib(row_to(p, ib_)), ja(col_from(p, ja_)), jb(col_to(p, jb_)),
-      nc_(std::max(0, jb - ja + 1)), d_(nullptr), rows_(std::max(0, ib - ia + 1), 0.0) {
+CellSums::CellSums(const Params& p, int ia_, int ib_, int ja_, int jb_, int k_)
+    : ia(row_from(p, ia_)), ib(row_to(p, ib_)), ja(col_from(p, ja_)), jb(col_to(p, jb_)), k(k_),
+      nc(std::max(0, jb - ja + 1)), d_(nullptr),
+      rows_(static_cast<std::size_t>(std::max(0, ib - ia + 1)) * k_, 0.0) {
     if (p.grid_cols > 1)
-        d_ = cell_buffer(rows_.size() * static_cast<std::size_t>(nc_));
+        d_ = cell_buffer(rows_.size() * static_cast<std::size_t>(nc));
 }
 
-// Fixed order: global row 0 first. Rows no rank filled hold 0.0, and x + 0.0 == x.
-static double add_rows(const std::vector<double>& rows) {
-    double s = 0.0;
-    for (double r : rows)
-        s += r;
-    return s;
+// Fixed order: global row 0 first, value m of row r at rows[r * k + m]. Rows no rank filled hold
+// 0.0, and x + 0.0 == x.
+static void add_rows(const std::vector<double>& rows, int k, double* out) {
+    for (int m = 0; m < k; ++m) {
+        double s = 0.0;
+        for (std::size_t r = static_cast<std::size_t>(m); r < rows.size(); r += k)
+            s += rows[r];
+        out[m] = s;
+    }
 }
 
-double CellSums::sum(const Params& p) const {
-    const int nr = std::max(0, ib - ia + 1);
-    std::vector<double> part(nr, 0.0); // row partials: 0.0, or what the west neighbour reached
+void CellSums::sum(const Params& p, double* out) const {
+    const int nr = std::max(0, ib - ia + 1), n = nr * k;
+    std::vector<double> part(n, 0.0); // row partials: 0.0, or what the west neighbour reached
     if (!d_) {
         part = rows_; // whole rows, summed by the kernel
     } else {
 #ifdef SIMPLE_MPI
         if (p.grid_j > 0)
-            MPI_Recv(part.data(), nr, MPI_DOUBLE, p.rank - 1, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            MPI_Recv(part.data(), n, MPI_DOUBLE, p.rank - 1, 4, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 #endif
 #pragma omp parallel for schedule(static)
-        for (int r = 0; r < nr; ++r) {
-            double s = part[r];
-            const double* c = d_ + static_cast<std::size_t>(r) * nc_;
-            for (int j = 0; j < nc_; ++j)
-                s += c[j];
-            part[r] = s;
-        }
+        for (int r = 0; r < nr; ++r)
+            for (int m = 0; m < k; ++m) {
+                double s = part[static_cast<std::size_t>(r) * k + m];
+                const double* c = d_ + (static_cast<std::size_t>(r) * k + m) * nc;
+                for (int j = 0; j < nc; ++j)
+                    s += c[j];
+                part[static_cast<std::size_t>(r) * k + m] = s;
+            }
     }
-    std::vector<double> rows(p.nrows, 0.0);
+    std::vector<double> rows(static_cast<std::size_t>(p.nrows) * k, 0.0);
     if (p.grid_j < p.grid_cols - 1) {
 #ifdef SIMPLE_MPI
-        MPI_Send(part.data(), nr, MPI_DOUBLE, p.rank + 1, 4, MPI_COMM_WORLD);
+        MPI_Send(part.data(), n, MPI_DOUBLE, p.rank + 1, 4, MPI_COMM_WORLD);
 #endif
     } else {
-        std::copy(part.begin(), part.end(), rows.begin() + std::max(0, ia));
+        std::copy(part.begin(), part.end(), rows.begin() + std::max(0, ia) * k);
     }
     if (p.nranks == 1)
-        return add_rows(rows);
+        return add_rows(rows, k, out);
 #ifdef SIMPLE_MPI
     // Every rank receives the full row sums held by the last rank of each grid row, in place.
     std::vector<int> counts(p.nranks, 0), displs(p.nranks, 0);
@@ -142,13 +191,13 @@ double CellSums::sum(const Params& p) const {
         int rlo = 0, rhi = 0, clo = 0, chi = 0;
         owned_block(p, r, rlo, rhi, clo, chi);
         if (r % p.grid_cols == p.grid_cols - 1) {
-            displs[r] = rlo;
-            counts[r] = rhi - rlo + 1;
+            displs[r] = rlo * k;
+            counts[r] = (rhi - rlo + 1) * k;
         }
     }
     MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, rows.data(), counts.data(), displs.data(),
                    MPI_DOUBLE, MPI_COMM_WORLD);
-    return add_rows(rows);
+    add_rows(rows, k, out);
 #else
     throw std::runtime_error("nranks > 1 needs a build with -DSIMPLE_MPI=ON");
 #endif
@@ -204,62 +253,109 @@ void gather_field(const Params& p, const Field2D& local, Field2D& global) {
 
 #ifdef SIMPLE_MPI
 
-// H columns of the owned rows, one strided datatype per field shape (all fields of a rank share
-// it). ponytail: MPI_Type_vector; manual packing is the alternative to measure on the cluster.
-static MPI_Datatype column_type(int count, int H, int stride) {
-    static MPI_Datatype t = MPI_DATATYPE_NULL;
-    static int key[3] = {-1, -1, -1};
-    if (count != key[0] || H != key[1] || stride != key[2]) {
-        if (t != MPI_DATATYPE_NULL)
-            MPI_Type_free(&t);
-        MPI_Type_vector(count, H, stride, MPI_DOUBLE, &t);
+// `depth` columns of `count` rows, one committed datatype per shape (fields and multigrid levels
+// have a few shapes each). ponytail: MPI_Type_vector, never freed; manual packing is the
+// alternative to measure on the cluster.
+static MPI_Datatype column_type(int count, int depth, int stride) {
+    static std::map<std::array<int, 3>, MPI_Datatype> types;
+    const std::array<int, 3> key{count, depth, stride};
+    auto it = types.find(key);
+    if (it == types.end()) {
+        MPI_Datatype t;
+        MPI_Type_vector(count, depth, stride, MPI_DOUBLE, &t);
         MPI_Type_commit(&t);
-        key[0] = count;
-        key[1] = H;
-        key[2] = stride;
+        it = types.emplace(key, t).first;
     }
-    return t;
+    return it->second;
+}
+
+void halo_exchange_raw(const Params& p, double* x00, int nr, int nc, int stride, int west,
+                       int depth) {
+    if (p.nranks == 1)
+        return;
+    MPI_Request req[4];
+    // Tags: 0 south-going, 1 north-going, 2 east-going, 3 west-going.
+    if (p.grid_cols > 1) { // east/west: `depth` columns of the owned rows
+        const MPI_Datatype t = column_type(nr, depth, stride);
+        int k = 0;
+        if (p.grid_j > 0) {
+            MPI_Irecv(x00 - depth, 1, t, p.rank - 1, 2, MPI_COMM_WORLD, &req[k++]);
+            MPI_Isend(x00, 1, t, p.rank - 1, 3, MPI_COMM_WORLD, &req[k++]);
+        }
+        if (p.grid_j < p.grid_cols - 1) {
+            MPI_Irecv(x00 + nc, 1, t, p.rank + 1, 3, MPI_COMM_WORLD, &req[k++]);
+            MPI_Isend(x00 + nc - depth, 1, t, p.rank + 1, 2, MPI_COMM_WORLD, &req[k++]);
+        }
+        MPI_Waitall(k, req, MPI_STATUSES_IGNORE);
+    }
+    if (p.grid_rows > 1) { // north/south: `depth` whole stored rows (contiguous), corners included
+        const int n = depth * stride, up = p.rank - p.grid_cols, down = p.rank + p.grid_cols;
+        auto row = [&](int i) { return x00 + static_cast<std::ptrdiff_t>(i) * stride - west; };
+        int k = 0;
+        if (p.grid_i > 0) { // neighbour above owns the rows just before the first owned one
+            MPI_Irecv(row(-depth), n, MPI_DOUBLE, up, 0, MPI_COMM_WORLD, &req[k++]);
+            MPI_Isend(row(0), n, MPI_DOUBLE, up, 1, MPI_COMM_WORLD, &req[k++]);
+        }
+        if (p.grid_i < p.grid_rows - 1) {
+            MPI_Irecv(row(nr), n, MPI_DOUBLE, down, 1, MPI_COMM_WORLD, &req[k++]);
+            MPI_Isend(row(nr - depth), n, MPI_DOUBLE, down, 0, MPI_COMM_WORLD, &req[k++]);
+        }
+        MPI_Waitall(k, req, MPI_STATUSES_IGNORE);
+    }
 }
 
 void halo_exchange(const Params& p, Field2D& f) {
     if (p.nranks == 1)
         return;
-    const int H = p.H;
-    MPI_Request req[4];
-    // Tags: 0 south-going, 1 north-going, 2 east-going, 3 west-going.
-    if (p.grid_cols > 1) { // east/west: H columns of the owned rows
-        const MPI_Datatype t = column_type(p.row_hi - p.row_lo + 1, H, f.cols());
-        const int i = p.row_lo;
-        int k = 0;
-        if (p.grid_j > 0) {
-            MPI_Irecv(&f(i, p.col_lo - H), 1, t, p.rank - 1, 2, MPI_COMM_WORLD, &req[k++]);
-            MPI_Isend(&f(i, p.col_lo), 1, t, p.rank - 1, 3, MPI_COMM_WORLD, &req[k++]);
-        }
-        if (p.grid_j < p.grid_cols - 1) {
-            MPI_Irecv(&f(i, p.col_hi + 1), 1, t, p.rank + 1, 3, MPI_COMM_WORLD, &req[k++]);
-            MPI_Isend(&f(i, p.col_hi - H + 1), 1, t, p.rank + 1, 2, MPI_COMM_WORLD, &req[k++]);
-        }
-        MPI_Waitall(k, req, MPI_STATUSES_IGNORE);
+    halo_exchange_raw(p, &f(p.row_lo, p.col_lo), p.row_hi - p.row_lo + 1, p.col_hi - p.col_lo + 1,
+                      f.cols(), p.col_lo - f.col0(), p.H);
+}
+
+void allgather_level(const Params& p, int shift, double* x00, int stride) {
+    if (p.nranks == 1)
+        return;
+    std::vector<int> box(4 * static_cast<std::size_t>(p.nranks)), counts(p.nranks),
+        displs(p.nranks);
+    int total = 0;
+    for (int r = 0; r < p.nranks; ++r) {
+        int* b = &box[4 * static_cast<std::size_t>(r)];
+        interior_block(p, r, b[0], b[1], b[2], b[3]);
+        for (int m = 0; m < 4; ++m)
+            b[m] >>= shift; // the split unit is 2^mg_split, so blocks stay aligned
+        counts[r] = b[1] * b[3];
+        displs[r] = total;
+        total += counts[r];
     }
-    if (p.grid_rows > 1) { // north/south: H full stored rows (contiguous), corners included
-        const int n = H * f.cols(), up = p.rank - p.grid_cols, down = p.rank + p.grid_cols;
-        auto row = [&](int i) { return &f(i, f.col0()); };
-        int k = 0;
-        if (p.grid_i > 0) { // neighbour above owns the rows just before row_lo
-            MPI_Irecv(row(p.row_lo - H), n, MPI_DOUBLE, up, 0, MPI_COMM_WORLD, &req[k++]);
-            MPI_Isend(row(p.row_lo), n, MPI_DOUBLE, up, 1, MPI_COMM_WORLD, &req[k++]);
-        }
-        if (p.grid_i < p.grid_rows - 1) {
-            MPI_Irecv(row(p.row_hi + 1), n, MPI_DOUBLE, down, 1, MPI_COMM_WORLD, &req[k++]);
-            MPI_Isend(row(p.row_hi - H + 1), n, MPI_DOUBLE, down, 0, MPI_COMM_WORLD, &req[k++]);
-        }
-        MPI_Waitall(k, req, MPI_STATUSES_IGNORE);
+    std::vector<double> all(total);
+    double* mine = all.data() + displs[p.rank];
+    const int* b = &box[4 * static_cast<std::size_t>(p.rank)];
+    for (int I = 0; I < b[1]; ++I)
+        for (int J = 0; J < b[3]; ++J)
+            *mine++ = x00[static_cast<std::ptrdiff_t>(b[0] + I) * stride + b[2] + J];
+    MPI_Allgatherv(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, all.data(), counts.data(), displs.data(),
+                   MPI_DOUBLE, MPI_COMM_WORLD);
+    for (int r = 0; r < p.nranks; ++r) {
+        const int* q = &box[4 * static_cast<std::size_t>(r)];
+        const double* src = all.data() + displs[r];
+        for (int I = 0; I < q[1]; ++I)
+            for (int J = 0; J < q[3]; ++J)
+                x00[static_cast<std::ptrdiff_t>(q[0] + I) * stride + q[2] + J] = *src++;
     }
 }
 
 #else // no MPI: only one rank can exist
 
 void halo_exchange(const Params& p, Field2D&) {
+    if (p.nranks != 1)
+        throw std::runtime_error("nranks > 1 needs a build with -DSIMPLE_MPI=ON");
+}
+
+void halo_exchange_raw(const Params& p, double*, int, int, int, int, int) {
+    if (p.nranks != 1)
+        throw std::runtime_error("nranks > 1 needs a build with -DSIMPLE_MPI=ON");
+}
+
+void allgather_level(const Params& p, int, double*, int) {
     if (p.nranks != 1)
         throw std::runtime_error("nranks > 1 needs a build with -DSIMPLE_MPI=ON");
 }

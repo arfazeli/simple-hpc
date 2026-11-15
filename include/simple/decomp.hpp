@@ -22,17 +22,32 @@ void decompose(Params& p, int rank, int nranks);
 // Global rows [rlo, rhi] and columns [clo, chi] owned by rank r (the split decompose() uses).
 void owned_block(const Params& p, int r, int& rlo, int& rhi, int& clo, int& chi);
 
+// Interior cells of rank r in level-0 multigrid indices (I = i - H, J = j - H - 1): rows
+// [I0, I0 + nI) x columns [J0, J0 + nJ).
+void interior_block(const Params& p, int r, int& I0, int& nI, int& J0, int& nJ);
+
 // Fill f's halo from the neighbouring ranks' owned cells, H deep. East/west first (the owned rows),
 // then north/south over the full stored width, so the corner halos (read by the staggered
 // interpolation in assemble_u/v) arrive with the second phase. No-op on one rank.
 // Call outside OpenMP parallel regions or from the master thread only (MPI_THREAD_FUNNELED).
 void halo_exchange(const Params& p, Field2D& f);
+// Same exchange on a raw array: x00 is the rank's first owned cell, nr x nc owned cells, rows
+// `stride` apart, `depth` halo cells on each side; north/south messages carry `depth` whole stored
+// rows, which start `west` cells before x00. Neighbours from the same process grid.
+void halo_exchange_raw(const Params& p, double* x00, int nr, int nc, int stride, int west,
+                       int depth);
+// Multigrid level `shift` stored whole on every rank: x00 is its interior cell (0, 0), rows
+// `stride` apart. Each rank's block (interior_block >> shift) is sent to every rank, in place.
+// No-op on one rank.
+void allgather_level(const Params& p, int shift, double* x00, int stride);
 
 // Deterministic global sum of one value per cell over a kernel's global range [ia, ib] x [ja, jb].
 // A kernel row looks like this (one thread per row, j ascending):
 //     double s = 0.0, *c = cs.cells(i);
 //     for (j = cs.ja; j <= cs.jb; ++j) { v = ...; s += v; if (c) c[j - cs.ja] = v; }
 //     cs.row(i, s);
+// With k values per cell (k > 1), value m of cell j goes to c[m * cs.nc + j - cs.ja], the row
+// passes its k sums with row(i, s[k]), and sum(p, out) fills out[k]; one collective for all k.
 // sum() adds every row j ascending from 0.0, then the rows in ascending global order: same bits
 // for any process grid or thread count. With one grid column a rank holds whole rows, so the
 // kernel's own row sums are used and cells() is nullptr. Otherwise the cells are kept and sum()
@@ -40,18 +55,28 @@ void halo_exchange(const Params& p, Field2D& f);
 // Construct and call sum() outside OpenMP parallel regions; cells() and row() are safe inside.
 class CellSums {
   public:
-    CellSums(const Params& p, int ia, int ib, int ja, int jb);
+    CellSums(const Params& p, int ia, int ib, int ja, int jb, int k = 1);
     double* cells(int i) {
-        return d_ ? d_ + static_cast<std::size_t>(i - ia) * static_cast<std::size_t>(nc_) : nullptr;
+        return d_ ? d_ + static_cast<std::size_t>(i - ia) * static_cast<std::size_t>(k * nc)
+                  : nullptr;
     }
     void row(int i, double s) { rows_[static_cast<std::size_t>(i - ia)] = s; }
-    double sum(const Params& p) const;
+    void row(int i, const double* s) {
+        for (int m = 0; m < k; ++m)
+            rows_[static_cast<std::size_t>(i - ia) * k + m] = s[m];
+    }
+    double sum(const Params& p) const {
+        double s = 0.0;
+        sum(p, &s);
+        return s;
+    }
+    void sum(const Params& p, double* out) const;
     const int ia, ib, ja, jb; // the range clamped to this rank's block
+    const int k, nc;          // values per cell, columns in the clamped range
 
   private:
-    int nc_;
     double* d_; // cells (more than one grid column only); shared buffer, kernels run one at a time
-    std::vector<double> rows_;
+    std::vector<double> rows_; // k sums per row
 };
 
 // Rank 0 receives every rank's owned block of `local` into `global` (nrows x ncols, row0 = col0 =

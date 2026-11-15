@@ -47,6 +47,9 @@ struct Params {
     int col_lo = 0, col_hi = INT_MAX;   // global columns this rank computes (inclusive)
     int alloc_row0 = 0, alloc_rows = 0; // stored rows: owned plus H halo rows (0 = all nrows)
     int alloc_col0 = 0, alloc_cols = 0; // stored columns: owned plus H halo (0 = all ncols)
+    // pressure_solver = mg on > 1 rank: levels 0..mg_split-1 are decomposed, level mg_split is
+    // gathered onto every rank. The interior is split in units of 2^mg_split cells. 0 = no split.
+    int mg_split = 0;
 };
 
 // Clamp a kernel's global row / column range [a, b] to the cells this rank owns.

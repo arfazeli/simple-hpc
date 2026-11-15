@@ -22,8 +22,15 @@
 // works on the rows whose pages it first-touched. Per-cell results and fixed-order sums are
 // unchanged.
 // Smoother: red-black Gauss-Seidel with the two-statement update of SPEC 4.3 step 4, colour (I + J)
-// mod 2 in local indices, colour 0 first. Every kernel is per-cell independent or a fixed-order
-// sum, so results do not depend on the thread count.
+// mod 2 in global level indices, colour 0 first. Every kernel is per-cell independent or a
+// fixed-order sum, so results do not depend on the thread count.
+
+// MPI (T44): levels 0..D-1 (D = Params::mg_split) hold this rank's block only; the split unit
+// 2^D keeps every rank boundary between 2x2 blocks, so restriction, prolongation and the coarse
+// build stay local, and the smoother exchanges halos after each colour and after prolongation.
+// Level D's right-hand side (and operator, in mg_build) is gathered onto every rank, which then
+// runs levels D.. and the coarse solve redundantly with the serial code: the same bits on any grid.
+// With one rank D = number of levels (nothing gathered).
 
 // Level dimensions (rows, cols), finest first.
 std::vector<std::pair<int, int>> mg_level_dims(int nx, int ny);
@@ -32,7 +39,8 @@ std::vector<std::pair<int, int>> mg_level_dims(int nx, int ny);
 // (interior (1..nx, 1..ny)). Level 0 owns only the residual r, laid out like the Field2D arrays
 // (nrows x ncols); its coefficients, b and x are PressureWork's AEP.., b and pc.
 struct MGLevel {
-    int nx = 0, ny = 0;
+    int nx = 0, ny = 0; // cells stored as interior: this rank's block on decomposed levels
+    int I0 = 0, J0 = 0; // global level index of interior cell (0, 0)
     // No-init storage, first-touched in parallel by MGWork's constructor (T38).
     std::vector<double, NoInitAlloc<double>> AE, AW, AN, AS, AP, b, x, r;
 };
@@ -42,6 +50,7 @@ struct MGLevel {
 // doubles earlier. Neighbours (I+-1, J) and (I, J+-1) of any interior cell are inside it.
 struct MGView {
     int nx = 0, ny = 0, stride = 0;
+    int I0 = 0, J0 = 0; // global level index of element (0, 0)
     std::size_t alloc = 0;
     std::ptrdiff_t base = 0;
     double *AE = nullptr, *AW = nullptr, *AN = nullptr, *AS = nullptr, *AP = nullptr;
@@ -50,7 +59,10 @@ struct MGView {
 
 struct MGWork {
     std::vector<MGLevel> levels;
-    int H = 0, nrows = 0, ncols = 0;
+    int H = 0, nrows = 0, ncols = 0; // level-0 storage: PressureWork's arrays (rank's block)
+    int row0 = 0, col0 = 0;          // their first stored global row / column
+    int split = 0;                   // levels 0..split-1 are decomposed (all of them on one rank)
+    Params prm;                      // decomposition, for the halo exchanges and the gather
     // Levels with fewer cells run their kernels on one thread (same results, less overhead).
     int parallel_min_cells = 4096;
     int last_coarse_sweeps = 0; // red-black sweeps of the last coarsest-level solve
@@ -68,7 +80,8 @@ void mg_build(PressureWork& w, MGWork& mg);
 // If level 0 is also the coarsest level, the coarse solve removes the mean of w.b in place.
 void mg_vcycle(const Params& p, PressureWork& w, MGWork& mg);
 // Subtract the interior mean of x on level L (fixed-order sum: per-row partial sums, then rows
-// in order). Returns the mean removed.
+// in order). Returns the mean removed. One rank, or a level held whole on every rank.
 double mg_remove_mean(MGWork& mg, const MGView& L, double* x);
-// pressure_solver = mg: mg_build; p' = 0; mg_cycles V-cycles; remove the mean of p'.
+// pressure_solver = mg: mg_build; p' = 0; mg_cycles V-cycles; remove the mean of p' (global
+// fixed-order sums on any process grid); refresh p' halos for correct().
 void solve_pc_mg(const Params& p, PressureWork& w, MGWork& mg);

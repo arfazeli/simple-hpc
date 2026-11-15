@@ -75,12 +75,13 @@ static inline void pc_update(PressureWork& w, const Field2D& src, int i, int j) 
 }
 
 void solve_pc_jacobi(const Params& p, PressureWork& w, Field2D& old) {
-    const int H = p.H, NX = p.NX, NY = p.NY, r0 = w.pc.row0(), r1 = w.pc.row0() + w.pc.rows(),
-              c0 = w.pc.col0(), c1 = c0 + w.pc.cols();
+    const int H = p.H, NX = p.NX, r0 = w.pc.row0(), r1 = w.pc.row0() + w.pc.rows(),
+              c0 = w.pc.col0(), c1 = c0 + w.pc.cols(), jmin = col_from(p, H + 1),
+              jmax = col_to(p, p.NY + H);
     const int n = p.maxit_inner_p;
     w.pc.fill(0.0);
-    // T32: one copy, then the two buffers alternate. Halo cells are never written, so both stay 0
-    // there. The first destination is chosen so that the last pass writes w.pc.
+    // T32: one copy, then the two buffers alternate. Physical halo cells are never written, so
+    // both stay 0 there. The first destination is chosen so that the last pass writes w.pc.
 #pragma omp parallel
     {
 #pragma omp for schedule(static)
@@ -93,13 +94,19 @@ void solve_pc_jacobi(const Params& p, PressureWork& w, Field2D& old) {
             Field2D& dst = to_pc ? w.pc : old;
 #pragma omp for schedule(static)
             for (int i = row_to(p, NX + H - 1); i >= row_from(p, H); --i)
-                for (int j = H + 1; j <= NY + H; ++j) {
+                for (int j = jmin; j <= jmax; ++j) {
                     dst(i, j) = w.b(i, j) / w.APP(i, j);
                     dst(i, j) += (w.AEP(i, j) * src(i, j + 1) + w.AWP(i, j) * src(i, j - 1) +
                                   w.ASP(i, j) * src(i + 1, j) + w.ANP(i, j) * src(i - 1, j)) /
                                  w.APP(i, j);
                     dst(i, j) = kPcJacobiWeight * dst(i, j) + (1 - kPcJacobiWeight) * src(i, j);
                 }
+            // MPI: the next pass (and correct, after the last) reads dst in the neighbours' halos.
+            if (p.nranks > 1) {
+#pragma omp master
+                halo_exchange(p, dst);
+#pragma omp barrier
+            }
         }
     }
 }
@@ -157,17 +164,50 @@ CGWork::CGWork(int rows, int cols, int row0, int col0)
       d(rows, cols, 0.0, row0, col0), q(rows, cols, 0.0, row0, col0) {}
 
 void apply_A_p(const Params& p, const PressureWork& w, const Field2D& x, Field2D& out) {
-    const int H = p.H, NX = p.NX, NY = p.NY;
+    const int H = p.H, NX = p.NX, jmin = col_from(p, H + 1), jmax = col_to(p, p.NY + H);
 #pragma omp parallel for schedule(static)
     for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-        for (int j = H + 1; j <= NY + H; ++j)
+        for (int j = jmin; j <= jmax; ++j)
             out(i, j) =
                 w.APP(i, j) * x(i, j) - (w.AEP(i, j) * x(i, j + 1) + w.AWP(i, j) * x(i, j - 1) +
                                          w.ASP(i, j) * x(i + 1, j) + w.ANP(i, j) * x(i - 1, j));
 }
 
+// Sums of K per-cell values over the interior in the fixed order of CellSums (rows j ascending,
+// then rows ascending): the same bits for any thread count or process grid. f(i, j, v) writes the
+// K values of cell (i, j) into v.
+template <int K, class F> static void cg_sums(const Params& p, F f, double* out) {
+    const int H = p.H;
+    CellSums cs(p, H, p.NX + H - 1, H + 1, p.NY + H, K);
+    const int ia = cs.ia, ib = cs.ib, ja = cs.ja, jb = cs.jb, nc = cs.nc;
+    // Rows ascending like the rest of CG (not T38's descending order) and bounds in locals: rows
+    // descending, or bounds read through `cs`, made the solve ~50 % slower under Apple clang and
+    // ~10 % under GCC 15 (256^2, one thread).
+#pragma omp parallel for schedule(static)
+    for (int i = ia; i <= ib; ++i) {
+        double s[K] = {}, v[K];
+        double* c = cs.cells(i);
+        if (c) // more than one grid column: keep the cells for the west-to-east chain
+            for (int j = ja; j <= jb; ++j) {
+                f(i, j, v);
+                for (int m = 0; m < K; ++m) {
+                    s[m] += v[m];
+                    c[m * nc + j - ja] = v[m];
+                }
+            }
+        else
+            for (int j = ja; j <= jb; ++j) {
+                f(i, j, v);
+                for (int m = 0; m < K; ++m)
+                    s[m] += v[m];
+            }
+        cs.row(i, s);
+    }
+    cs.sum(p, out);
+}
+
 int solve_pc_cg(const Params& p, PressureWork& w, CGWork& cg) {
-    const int H = p.H, NX = p.NX, NY = p.NY;
+    const int H = p.H, NX = p.NX, NY = p.NY, jmin = col_from(p, H + 1), jmax = col_to(p, NY + H);
     const double n = static_cast<double>(NX) * NY;
     Field2D &r = cg.r, &z = cg.z, &d = cg.d, &q = cg.q, &x = w.pc;
     if (cg.history)
@@ -179,25 +219,24 @@ int solve_pc_cg(const Params& p, PressureWork& w, CGWork& cg) {
 
     // Project b onto the range of A (mean zero); r0 = b - A*0 = b.
     double sb = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : sb)
-    for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-        for (int j = H + 1; j <= NY + H; ++j)
-            sb += w.b(i, j);
+    cg_sums<1>(p, [&](int i, int j, double* v) { v[0] = w.b(i, j); }, &sb);
     const double mb = sb / n;
     // z = r / APP (Jacobi); sums for ||r||^2, sum(z), r.z and sum(r) in the same pass.
-    double rr = 0.0, sz = 0.0, rz = 0.0, sr = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : rr, sz, rz, sr)
-    for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-        for (int j = H + 1; j <= NY + H; ++j) {
+    double s4[4];
+    cg_sums<4>(
+        p,
+        [&](int i, int j, double* v) {
             const double ri = w.b(i, j) - mb;
             r(i, j) = ri;
             const double zi = ri / w.APP(i, j);
             z(i, j) = zi;
-            rr += ri * ri;
-            sz += zi;
-            rz += ri * zi;
-            sr += ri;
-        }
+            v[0] = ri * ri;
+            v[1] = zi;
+            v[2] = ri * zi;
+            v[3] = ri;
+        },
+        s4);
+    double rr = s4[0], sz = s4[1], rz = s4[2], sr = s4[3];
     if (cg.history)
         cg.history->push_back(rr > 0.0 ? 1.0 : 0.0);
     if (rr == 0.0)
@@ -208,40 +247,45 @@ int solve_pc_cg(const Params& p, PressureWork& w, CGWork& cg) {
     rz -= mz * sr;
 #pragma omp parallel for schedule(static)
     for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-        for (int j = H + 1; j <= NY + H; ++j)
+        for (int j = jmin; j <= jmax; ++j)
             d(i, j) = z(i, j) - mz;
 
     int k = 0;
     double rel = 1.0;
     while (k < p.pressure_maxit) {
+        halo_exchange(p, d); // the matvec reads d in the neighbours' halos
         double dq = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : dq)
-        for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-            for (int j = H + 1; j <= NY + H; ++j) {
+        cg_sums<1>(
+            p,
+            [&](int i, int j, double* v) {
                 const double qi =
                     w.APP(i, j) * d(i, j) - (w.AEP(i, j) * d(i, j + 1) + w.AWP(i, j) * d(i, j - 1) +
                                              w.ASP(i, j) * d(i + 1, j) + w.ANP(i, j) * d(i - 1, j));
                 q(i, j) = qi;
-                dq += d(i, j) * qi;
-            }
+                v[0] = d(i, j) * qi;
+            },
+            &dq);
         if (!(dq > 0.0))
             break; // breakdown (d in the null space or round-off): stop with the current x
         const double alpha = rz / dq;
-        rr = sz = sr = 0.0;
-        double rzn = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : rr, sz, rzn, sr)
-        for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-            for (int j = H + 1; j <= NY + H; ++j) {
+        cg_sums<4>(
+            p,
+            [&](int i, int j, double* v) {
                 x(i, j) += alpha * d(i, j);
                 const double ri = r(i, j) - alpha * q(i, j);
                 r(i, j) = ri;
                 const double zi = ri / w.APP(i, j);
                 z(i, j) = zi;
-                rr += ri * ri;
-                sz += zi;
-                rzn += ri * zi;
-                sr += ri;
-            }
+                v[0] = ri * ri;
+                v[1] = zi;
+                v[2] = ri * zi;
+                v[3] = ri;
+            },
+            s4);
+        rr = s4[0];
+        sz = s4[1];
+        double rzn = s4[2];
+        sr = s4[3];
         ++k;
         rel = std::sqrt(rr) / nb;
         if (cg.history)
@@ -254,21 +298,19 @@ int solve_pc_cg(const Params& p, PressureWork& w, CGWork& cg) {
         rz = rzn;
 #pragma omp parallel for schedule(static)
         for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-            for (int j = H + 1; j <= NY + H; ++j)
+            for (int j = jmin; j <= jmax; ++j)
                 d(i, j) = (z(i, j) - mz) + beta * d(i, j);
     }
 
     // Remove the mean of the solution (it is zero up to round-off).
     double sx = 0.0;
-#pragma omp parallel for schedule(static) reduction(+ : sx)
-    for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-        for (int j = H + 1; j <= NY + H; ++j)
-            sx += x(i, j);
+    cg_sums<1>(p, [&](int i, int j, double* v) { v[0] = x(i, j); }, &sx);
     const double mx = sx / n;
 #pragma omp parallel for schedule(static)
     for (int i = row_from(p, H); i <= row_to(p, NX + H - 1); ++i)
-        for (int j = H + 1; j <= NY + H; ++j)
+        for (int j = jmin; j <= jmax; ++j)
             x(i, j) -= mx;
+    halo_exchange(p, x); // correct reads p' in the neighbours' halos
     cg.last_iterations = k;
     cg.last_rel_residual = rel;
     cg.last_mean_removed = mx;

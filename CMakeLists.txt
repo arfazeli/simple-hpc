@@ -79,9 +79,8 @@ target_link_libraries(simple_tests PRIVATE simple_core Catch2::Catch2WithMain)
 target_include_directories(simple_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 target_compile_definitions(simple_tests PRIVATE SIMPLE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 include(Catch)
-# Momentum and p' residuals are fixed-order row sums (same bits for any thread count), but the cg
-# dot products are OpenMP reductions, so tests run with one thread by default (test_threads.cpp
-# sets its own counts).
+# Residuals and the cg / mg sums are fixed-order row sums (same bits for any thread count). Tests
+# run with one thread by default; test_threads.cpp and the other thread tests set their own counts.
 catch_discover_tests(simple_tests PROPERTIES ENVIRONMENT OMP_NUM_THREADS=1 SKIP_RETURN_CODE 4)
 
 # Ghia validation runs: slow, labelled "ghia" (ctest -LE ghia skips them). Each test runs the

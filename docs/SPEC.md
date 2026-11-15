@@ -138,9 +138,10 @@ The sweeps in 4.1, 4.2 and step 4 of 4.3 are the default `gs_lex` (lexicographic
 - `mg` (p'): geometric multigrid V-cycles. Remove the mean of `b`, set `p' = 0`, run `mg_cycles` V-cycles (default 1), remove the mean of `p'`. Level 0 is the NX × NY interior; halve both dimensions while both are even and the result is at least 4 × 4.
   - Coarse operator: Galerkin with piecewise-constant transfer. Coarse cell `(I,J)` covers fine `(2I..2I+1) × (2J..2J+1)`; each coarse link is the sum of the 2 fine links crossing that face, and `AP = AE + AW + AN + AS`. It is rebuilt every outer iteration.
   - Transfers: restriction sums the 4 fine residuals. Prolongation adds `mg_omega` × the coarse value (default 1.8) to the 4 fine cells. These coarse links are about 2× too stiff in 2D, so the plain correction is about half the size needed; with an exact coarse solve, `x += omega P A_c^+ R r` does not increase the A-norm error for `0 < omega ≤ 2`.
-  - Smoother: red–black Gauss–Seidel in local colours `(I + J) mod 2`, `mg_pre` = `mg_post` = 2 sweeps.
+  - Smoother: red–black Gauss–Seidel in colours `(I + J) mod 2` (global level indices), `mg_pre` = `mg_post` = 2 sweeps.
   - Coarsest level: remove the mean of `b`, sweep until `||r|| < 1e-10 ||b||` or 200 sweeps, remove the mean of `x`.
   - Determinism: all sums run in a fixed order (row sums, then rows serially).
+  - MPI: the interior is split in units of `2^D` cells, so levels `0..D-1` are decomposed with rank boundaries between 2 × 2 blocks (halo exchange after each smoother colour and after prolongation). Level `D` is gathered onto every rank, which runs the remaining levels and the coarse solve redundantly. `D` is the deepest level at which every rank still owns at least 4 cells per side on level `D-1`.
 
 ## 5. Stopping rule
 

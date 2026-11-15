@@ -86,6 +86,56 @@ TEST_CASE("decompose: rejects too many ranks and solvers without an MPI path") {
     REQUIRE_THROWS_AS(decompose(q, 0, 2), std::runtime_error);
 }
 
+static Params mg_grid(int nx, int ny, const std::string& mpi_grid) {
+    std::istringstream in(
+        "N_cells_x = " + std::to_string(nx) + "\nN_cells_y = " + std::to_string(ny) +
+        "\nmomentum_solver = gs_multicolour\npressure_solver = mg\nmpi_grid = " + mpi_grid + "\n");
+    return make_params(parse_config(in));
+}
+
+TEST_CASE("decompose: mg splits in aligned units and picks the decomposed levels") {
+    // 32x40: levels 32x40, 16x20, 8x10, 4x5. 3x1: units of 4 rows -> 12 / 12 / 8 interior rows;
+    // a rank keeps >= 4 cells per side on level split-1.
+    struct Case {
+        int R, C, split;
+    } cases[] = {{3, 1, 2}, {2, 2, 3}, {4, 1, 2}, {1, 4, 2}, {6, 1, 1}, {2, 3, 2}};
+    for (const Case& c : cases) {
+        const Params g = mg_grid(32, 40, std::to_string(c.R) + "x" + std::to_string(c.C));
+        std::vector<int> rows;
+        for (int r = 0; r < c.R * c.C; ++r) {
+            Params p = g;
+            decompose(p, r, c.R * c.C);
+            REQUIRE(p.mg_split == c.split);
+            int I0 = 0, nI = 0, J0 = 0, nJ = 0;
+            interior_block(p, r, I0, nI, J0, nJ);
+            const int unit = 1 << c.split;
+            REQUIRE(I0 % unit == 0);
+            REQUIRE(nI % unit == 0);
+            REQUIRE(J0 % unit == 0);
+            REQUIRE(nJ % unit == 0);
+            if (r % c.C == 0)
+                rows.push_back(nI);
+        }
+        if (c.R == 3)
+            REQUIRE(rows == std::vector<int>{12, 12, 8});
+    }
+    Params one = mg_grid(32, 40, "auto");
+    decompose(one, 0, 1);
+    REQUIRE(one.mg_split == 0);         // one rank: nothing gathered, single-cell split
+    Params flat = mg_grid(6, 6, "2x1"); // one mg level: nothing to gather onto
+    REQUIRE_THROWS_AS(decompose(flat, 0, 2), std::runtime_error);
+}
+
+TEST_CASE("decompose: every p' solver but gs_lex has an MPI path") {
+    for (const char* ps : {"gs_redblack", "jacobi", "cg", "mg"}) {
+        std::istringstream in(std::string("N_cells_x = 32\nN_cells_y = 32\n"
+                                          "momentum_solver = gs_multicolour\npressure_solver = ") +
+                              ps + "\n");
+        Params p = make_params(parse_config(in));
+        REQUIRE_NOTHROW(decompose(p, 1, 2));
+    }
+}
+
 TEST_CASE("Field2D with row0 and col0 addresses global cells") {
     Field2D f(3, 4, 0.0, 10, 20);
     f(10, 20) = 1.0;
@@ -94,6 +144,30 @@ TEST_CASE("Field2D with row0 and col0 addresses global cells") {
     REQUIRE(f.col0() == 20);
     REQUIRE(f.data()[0] == 1.0);
     REQUIRE(f.data()[11] == 2.0);
+}
+
+TEST_CASE("CellSums with k values per cell: k independent fixed-order sums") {
+    std::istringstream in("N_cells_x = 8\nN_cells_y = 6\n");
+    const Params p = make_params(parse_config(in));
+    const int H = p.H;
+    CellSums cs(p, H, p.NX + H - 1, H + 1, p.NY + H, 2);
+    double ref[2] = {0.0, 0.0};
+    for (int i = cs.ia; i <= cs.ib; ++i) {
+        double s[2] = {0.0, 0.0}, r[2] = {0.0, 0.0};
+        for (int j = cs.ja; j <= cs.jb; ++j) {
+            s[0] += 0.1 * i + j;
+            s[1] += 1.0 / (i + j);
+            r[0] += 0.1 * i + j;
+            r[1] += 1.0 / (i + j);
+        }
+        cs.row(i, s);
+        ref[0] += r[0];
+        ref[1] += r[1];
+    }
+    double out[2];
+    cs.sum(p, out);
+    REQUIRE(out[0] == ref[0]);
+    REQUIRE(out[1] == ref[1]);
 }
 
 TEST_CASE("CellSums on one rank: rows j ascending from 0.0, then rows in order") {
