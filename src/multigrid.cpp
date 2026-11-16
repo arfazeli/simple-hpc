@@ -35,33 +35,38 @@ template <class F> double det_sum(const MGView& L, MGWork& mg, F f) {
 
 // `sweeps` red-black Gauss-Seidel sweeps on L.x, two-statement update of SPEC 4.3 step 4. `ex`
 // (if set) refreshes L.x's halo after each colour; it runs on the master thread (MPI FUNNELED).
-using Exchange = std::function<void()>;
-void smooth(const MGView& L, int sweeps, bool pr, const Exchange& ex = {}) {
+// Halo refresh of a decomposed level: full = blocking with corners, post = halo_post (the
+// corner-free one colour_sweeps overlaps), depth = cells sent per side. Empty: no exchange.
+struct Exchange {
+    std::function<void()> full, post;
+    int depth = 0;
+    explicit operator bool() const { return static_cast<bool>(full); }
+};
+
+void smooth(const MGView& L, int sweeps, bool pr, const Halo mode = Halo::None,
+            const Exchange& ex = {}, const Params* prm = nullptr) {
     (void)pr;
     const int par0 = L.I0 + L.J0; // colours in global indices
-    const int s = L.stride, nx = L.nx, ny = L.ny;
+    const int s = L.stride;
     double* x = L.x;
     const double *AE = L.AE, *AW = L.AW, *AN = L.AN, *AS = L.AS, *AP = L.AP, *b = L.b;
-#pragma omp parallel if (pr)
-    for (int k = 0; k < sweeps; ++k)
-        for (int c = 0; c < 2; ++c) {
-#pragma omp for schedule(static)
-            for (int k_ = 0; k_ < nx; ++k_) { // rows descending (T38)
-                const int I = nx - 1 - k_;
-                for (int J = (I + par0 + c) & 1; J < ny; J += 2) {
-                    const int q = I * s + J;
-                    x[q] = b[q] / AP[q];
-                    x[q] += (AE[q] * x[q + 1] + AW[q] * x[q - 1] + AS[q] * x[q + s] +
-                             AN[q] * x[q - s]) /
-                            AP[q];
-                }
-            }
-            if (ex) {
-#pragma omp master
-                ex();
-#pragma omp barrier
+    const Box k{0, L.nx - 1, 0, L.ny - 1};
+    const auto bx = prm ? overlap_boxes(*prm, k, k, ex.depth) : std::array<Box, 5>{};
+    auto pass = [&](int c, const Box& bk) {
+#pragma omp for schedule(static) nowait
+        for (int I = bk.ib; I >= bk.ia; --I) { // rows descending (T38)
+            int J = (I + par0 + c) & 1;
+            J += (std::max(0, bk.ja - J) + 1) / 2 * 2; // first cell of colour c in the box
+            for (; J <= bk.jb; J += 2) {
+                const int q = I * s + J;
+                x[q] = b[q] / AP[q];
+                x[q] += (AE[q] * x[q + 1] + AW[q] * x[q - 1] + AS[q] * x[q + s] + AN[q] * x[q - s]) /
+                        AP[q];
             }
         }
+    };
+#pragma omp parallel if (pr)
+    colour_sweeps(mode, sweeps, 2, k, bx, pass, [&] { ex.full(); }, [&] { ex.post(); });
 }
 
 // L.r = L.b - A L.x
@@ -275,9 +280,20 @@ static Exchange level_exchange(PressureWork& w, MGWork& mg, int l) {
     if (mg.prm.nranks == 1 || l >= mg.split)
         return {};
     if (l == 0)
-        return [&w, &mg] { halo_exchange(mg.prm, w.pc); };
+        return {[&w, &mg] { halo_exchange(mg.prm, w.pc); },
+                [&w, &mg] { halo_post(mg.prm, w.pc); }, mg.prm.H};
     const MGView L = mg_view(w, mg, l);
-    return [L, &mg] { halo_exchange_raw(mg.prm, L.x, L.nx, L.ny, L.stride, 1, 1); };
+    return {[L, &mg] { halo_exchange_raw(mg.prm, L.x, L.nx, L.ny, L.stride, 1, 1); },
+            [L, &mg] { halo_post_raw(mg.prm, L.x, L.nx, L.ny, L.stride, 1); }, 1};
+}
+
+// Smooth level l, refreshing its halos between colours when it is decomposed.
+static void smooth_level(PressureWork& w, MGWork& mg, int l, int sweeps, const Exchange& ex) {
+    const MGView L = mg_view(w, mg, l);
+    if (ex)
+        smooth(L, sweeps, par(L, mg), halo_mode(mg.prm), ex, &mg.prm);
+    else
+        smooth(L, sweeps, par(L, mg));
 }
 
 void mg_vcycle(const Params& p, PressureWork& w, MGWork& mg) {
@@ -285,7 +301,7 @@ void mg_vcycle(const Params& p, PressureWork& w, MGWork& mg) {
     for (int l = 0; l + 1 < nl; ++l) {
         const MGView F = mg_view(w, mg, l);
         const bool pr = par(F, mg);
-        smooth(F, p.mg_pre, pr, level_exchange(w, mg, l));
+        smooth_level(w, mg, l, p.mg_pre, level_exchange(w, mg, l));
         residual(F, pr);
         const MGView C = mg_view(w, mg, l + 1);
         if (mg.prm.nranks > 1 && l + 1 <= mg.split) // x = 0 on the halo and other ranks' cells
@@ -301,8 +317,8 @@ void mg_vcycle(const Params& p, PressureWork& w, MGWork& mg) {
         prolong(mg_view(w, mg, l + 1), F, p.mg_omega, pr);
         const Exchange ex = level_exchange(w, mg, l);
         if (ex)
-            ex(); // the first post-smoothing colour reads the other colour across the boundary
-        smooth(F, p.mg_post, pr, ex);
+            ex.full(); // the first post-smoothing colour reads the other colour across the boundary
+        smooth_level(w, mg, l, p.mg_post, ex);
     }
 }
 

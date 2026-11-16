@@ -136,6 +136,46 @@ TEST_CASE("decompose: every p' solver but gs_lex has an MPI path") {
     }
 }
 
+TEST_CASE("overlap_boxes: interior and strips cover the kernel box once; interior reads no halo") {
+    const int shapes[][2] = {{1, 1}, {2, 1}, {3, 1}, {1, 3}, {2, 2}, {3, 3}, {4, 2}};
+    for (auto& sh : shapes)
+        for (int reach : {1, 2, 4}) {
+            const int R = sh[0], C = sh[1];
+            const Params g = grid(24, 20, "mpi_grid = " + std::to_string(R) + "x" + std::to_string(C));
+            for (int r = 0; r < R * C; ++r) {
+                Params p = g;
+                decompose(p, r, R * C);
+                const Box k{row_from(p, p.H), row_to(p, p.NX + p.H - 1), col_from(p, p.H + 1),
+                            col_to(p, p.NY + p.H)};
+                const Box own{p.row_lo, p.row_hi, p.col_lo, p.col_hi};
+                const auto bx = overlap_boxes(p, k, own, reach);
+                std::vector<int> hits(static_cast<std::size_t>(p.nrows) * p.ncols, 0);
+                for (const Box& b : bx)
+                    for (int i = b.ia; i <= b.ib; ++i)
+                        for (int j = b.ja; j <= b.jb; ++j)
+                            ++hits[static_cast<std::size_t>(i) * p.ncols + j];
+                for (int i = 0; i < p.nrows; ++i)
+                    for (int j = 0; j < p.ncols; ++j) {
+                        const bool in = i >= k.ia && i <= k.ib && j >= k.ja && j <= k.jb;
+                        REQUIRE(hits[static_cast<std::size_t>(i) * p.ncols + j] == (in ? 1 : 0));
+                    }
+                const Box& b = bx[0]; // reach cells beyond the interior stay owned (or non-halo)
+                if (b.ia <= b.ib && b.ja <= b.jb) {
+                    if (p.grid_i > 0)
+                        REQUIRE(b.ia - reach >= own.ia);
+                    if (p.grid_i < R - 1)
+                        REQUIRE(b.ib + reach <= own.ib);
+                    if (p.grid_j > 0)
+                        REQUIRE(b.ja - reach >= own.ja);
+                    if (p.grid_j < C - 1)
+                        REQUIRE(b.jb + reach <= own.jb);
+                }
+                if (R * C == 1)
+                    REQUIRE((b.ia == k.ia && b.ib == k.ib && b.ja == k.ja && b.jb == k.jb));
+            }
+        }
+}
+
 TEST_CASE("Field2D with row0 and col0 addresses global cells") {
     Field2D f(3, 4, 0.0, 10, 20);
     f(10, 20) = 1.0;

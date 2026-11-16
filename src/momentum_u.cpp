@@ -122,27 +122,24 @@ void sweep_u_jacobi(const Params& p, const Coeffs& cu, Field2D& u, const Field2D
 
 void sweep_u_multicolour_batch(const Params& p, const Coeffs& cu, Field2D& u, const Field2D& pf,
                                int nsweeps) {
-    const int H = p.H, ncol = momentum_colours(p), jmin = col_from(p, H + 1),
-              jmax = col_to(p, p.NY + H - 1);
+    const int H = p.H, ncol = momentum_colours(p);
     const double a = p.relaxation_factor_u;
-#pragma omp parallel // one team for all sweeps and colours (T33)
-    for (int k = 0; k < nsweeps; ++k)
-        for (int c = 0; c < ncol; ++c) {
-#pragma omp for schedule(static)
-            for (int i = row_to(p, p.NX + H - 1); i >= row_from(p, H); --i)
-                for (int j = first_j(ncol, c, i, jmin); j <= jmax; j += ncol) {
-                    const double nb = ncol == 2 ? near_sum(cu, u, i, j) : nb_sum(cu, u, i, j);
-                    u(i, j) = a * (nb + (pf(i, j) - pf(i, j + 1)) * p.dy) / cu.AP(i, j) +
-                              (1 - a) * u(i, j);
-                }
-            // MPI: the next colour reads this colour's cells in the neighbours' halos. The
-            // omp for ended with a barrier; the master exchanges, then everyone waits for it.
-            if (p.nranks > 1) {
-#pragma omp master
-                halo_exchange(p, u);
-#pragma omp barrier
+    const Box k{row_from(p, H), row_to(p, p.NX + H - 1), col_from(p, H + 1), col_to(p, p.NY + H - 1)};
+    // MPI: the next colour reads this colour's cells in the neighbours' halos (colour_sweeps).
+    const auto bx = overlap_boxes(p, k, {p.row_lo, p.row_hi, p.col_lo, p.col_hi}, H);
+    auto pass = [&](int c, const Box& b) {
+#pragma omp for schedule(static) nowait
+        for (int i = b.ib; i >= b.ia; --i)
+            for (int j = first_j(ncol, c, i, b.ja); j <= b.jb; j += ncol) {
+                const double nb = ncol == 2 ? near_sum(cu, u, i, j) : nb_sum(cu, u, i, j);
+                u(i, j) =
+                    a * (nb + (pf(i, j) - pf(i, j + 1)) * p.dy) / cu.AP(i, j) + (1 - a) * u(i, j);
             }
-        }
+    };
+#pragma omp parallel // one team for all sweeps and colours (T33)
+    colour_sweeps(
+        halo_mode(p), nsweeps, ncol, k, bx, pass, [&] { halo_exchange(p, u); },
+        [&] { halo_post(p, u); });
 }
 
 void sweep_u_multicolour(const Params& p, const Coeffs& cu, Field2D& u, const Field2D& pf) {

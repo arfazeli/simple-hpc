@@ -1,7 +1,8 @@
 // MPI regression: a run on N ranks gives u, v, p byte-identical to the one-rank run, the same
 // residual history digit for digit, and stops at the same iteration, for every process grid
 // shape R x C with R * C = N (slabs N x 1, columns 1 x N, and blocks such as 2 x 2), for every
-// p' solver with an MPI path (gs_redblack, jacobi, cg, mg).
+// p' solver with an MPI path (gs_redblack, jacobi, cg, mg), with the sweeps' halo exchanges
+// overlapped with compute (default) and blocking (halo_overlap = False).
 // Run as `mpiexec -n N simple_mpi_tests`; exit code 0 on success on every rank.
 #include "simple/decomp.hpp"
 #include "simple/solver.hpp"
@@ -77,6 +78,12 @@ int main(int argc, char** argv) {
                     grid + fixed + "convection_scheme = UDS\ndiffusion_order = 2\n", rank, nranks);
         for (const char* ps : {"jacobi", "cg", "mg"})
             ok &= check(std::string(ps) + ", 300 its", grid + fixed, rank, nranks, ps);
+        // Blocking exchanges: the overlapped sweeps above must match these bit for bit too.
+        const std::string off = grid + fixed + "halo_overlap = False\n";
+        ok &= check("QUICK/4, blocking halos, 300 its", off, rank, nranks);
+        ok &= check("UDS/2, blocking halos, 300 its",
+                    off + "convection_scheme = UDS\ndiffusion_order = 2\n", rank, nranks);
+        ok &= check("mg, blocking halos, 300 its", off, rank, nranks, "mg");
         ok &= check("mg, Re 400 to convergence",
                     grid + "Re = 400\nmaxit = 20000\nerror_tolerance = 1e-4\n"
                            "residual_normalisation = running_max\n",

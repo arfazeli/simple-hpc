@@ -311,6 +311,55 @@ void halo_exchange(const Params& p, Field2D& f) {
                       f.cols(), p.col_lo - f.col0(), p.H);
 }
 
+// One corner-free exchange in flight at a time (halo_post ... halo_wait), master thread only.
+static MPI_Request g_req[8];
+static int g_nreq = 0;
+
+void halo_post_raw(const Params& p, double* x00, int nr, int nc, int stride, int depth) {
+    if (p.nranks == 1)
+        return;
+    if (g_nreq != 0)
+        throw std::logic_error("halo_post: an exchange is already in flight");
+    // Tags as in halo_exchange_raw. Every message is owned cells only, so no send buffer overlaps
+    // a receive buffer and all four directions go at once.
+    auto at = [&](int i, int j) { return x00 + static_cast<std::ptrdiff_t>(i) * stride + j; };
+    if (p.grid_cols > 1) {
+        const MPI_Datatype t = column_type(nr, depth, stride);
+        if (p.grid_j > 0) {
+            MPI_Irecv(at(0, -depth), 1, t, p.rank - 1, 2, MPI_COMM_WORLD, &g_req[g_nreq++]);
+            MPI_Isend(at(0, 0), 1, t, p.rank - 1, 3, MPI_COMM_WORLD, &g_req[g_nreq++]);
+        }
+        if (p.grid_j < p.grid_cols - 1) {
+            MPI_Irecv(at(0, nc), 1, t, p.rank + 1, 3, MPI_COMM_WORLD, &g_req[g_nreq++]);
+            MPI_Isend(at(0, nc - depth), 1, t, p.rank + 1, 2, MPI_COMM_WORLD, &g_req[g_nreq++]);
+        }
+    }
+    if (p.grid_rows > 1) {
+        const MPI_Datatype t = column_type(depth, nc, stride); // `depth` rows of nc owned cells
+        const int up = p.rank - p.grid_cols, down = p.rank + p.grid_cols;
+        if (p.grid_i > 0) {
+            MPI_Irecv(at(-depth, 0), 1, t, up, 0, MPI_COMM_WORLD, &g_req[g_nreq++]);
+            MPI_Isend(at(0, 0), 1, t, up, 1, MPI_COMM_WORLD, &g_req[g_nreq++]);
+        }
+        if (p.grid_i < p.grid_rows - 1) {
+            MPI_Irecv(at(nr, 0), 1, t, down, 1, MPI_COMM_WORLD, &g_req[g_nreq++]);
+            MPI_Isend(at(nr - depth, 0), 1, t, down, 0, MPI_COMM_WORLD, &g_req[g_nreq++]);
+        }
+    }
+}
+
+void halo_post(const Params& p, Field2D& f) {
+    if (p.nranks == 1)
+        return;
+    halo_post_raw(p, &f(p.row_lo, p.col_lo), p.row_hi - p.row_lo + 1, p.col_hi - p.col_lo + 1,
+                  f.cols(), p.H);
+}
+
+void halo_wait() {
+    MPI_Waitall(g_nreq, g_req, MPI_STATUSES_IGNORE);
+    g_nreq = 0;
+}
+
 void allgather_level(const Params& p, int shift, double* x00, int stride) {
     if (p.nranks == 1)
         return;
@@ -355,9 +404,37 @@ void halo_exchange_raw(const Params& p, double*, int, int, int, int, int) {
         throw std::runtime_error("nranks > 1 needs a build with -DSIMPLE_MPI=ON");
 }
 
+void halo_post(const Params& p, Field2D&) {
+    if (p.nranks != 1)
+        throw std::runtime_error("nranks > 1 needs a build with -DSIMPLE_MPI=ON");
+}
+
+void halo_post_raw(const Params& p, double*, int, int, int, int) {
+    if (p.nranks != 1)
+        throw std::runtime_error("nranks > 1 needs a build with -DSIMPLE_MPI=ON");
+}
+
+void halo_wait() {}
+
 void allgather_level(const Params& p, int, double*, int) {
     if (p.nranks != 1)
         throw std::runtime_error("nranks > 1 needs a build with -DSIMPLE_MPI=ON");
 }
 
 #endif
+
+std::array<Box, 5> overlap_boxes(const Params& p, const Box& k, const Box& own, int reach) {
+    // Interior rows [ra, rb], columns [ca, cb]: k shrunk by `reach` from each side of `own` that
+    // has a neighbour rank, clamped so the three row bands (and column bands) partition k.
+    const bool n = p.grid_i > 0, s = p.grid_i < p.grid_rows - 1;
+    const bool w = p.grid_j > 0, e = p.grid_j < p.grid_cols - 1;
+    const int ra = std::min(n ? std::max(k.ia, own.ia + reach) : k.ia, k.ib + 1);
+    const int rb = std::max(ra - 1, s ? std::min(k.ib, own.ib - reach) : k.ib);
+    const int ca = std::min(w ? std::max(k.ja, own.ja + reach) : k.ja, k.jb + 1);
+    const int cb = std::max(ca - 1, e ? std::min(k.jb, own.jb - reach) : k.jb);
+    return {{{ra, rb, ca, cb},
+             {k.ia, ra - 1, k.ja, k.jb},
+             {rb + 1, k.ib, k.ja, k.jb},
+             {ra, rb, k.ja, ca - 1},
+             {ra, rb, cb + 1, k.jb}}};
+}

@@ -50,6 +50,8 @@ struct Params {
     // pressure_solver = mg on > 1 rank: levels 0..mg_split-1 are decomposed, level mg_split is
     // gathered onto every rank. The interior is split in units of 2^mg_split cells. 0 = no split.
     int mg_split = 0;
+    // > 1 rank: overlap the halo exchanges inside coloured sweeps with the interior update.
+    bool halo_overlap = true;
 };
 
 // Clamp a kernel's global row / column range [a, b] to the cells this rank owns.

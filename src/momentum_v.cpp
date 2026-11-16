@@ -120,32 +120,28 @@ void sweep_v_jacobi(const Params& p, const Coeffs& cv, Field2D& v, const Field2D
 
 void sweep_v_multicolour_batch(const Params& p, const Coeffs& cv, Field2D& v, const Field2D& pf,
                                int nsweeps) {
-    const int H = p.H, NX = p.NX, ncol = momentum_colours(p), jmin = col_from(p, H + 1),
-              jmax = col_to(p, p.NY + H);
+    const int H = p.H, NX = p.NX, ncol = momentum_colours(p);
     const double av = p.relaxation_factor_v;
-#pragma omp parallel // one team for all sweeps and colours (T33)
-    for (int k = 0; k < nsweeps; ++k)
-        for (int c = 0; c < ncol; ++c) {
-#pragma omp for schedule(static)
-            for (int i = row_to(p, NX + H - 1); i >= row_from(p, H + 1); --i) {
-                int j0 = jmin;
-                while (momentum_colour(ncol, i, j0) != c)
-                    ++j0;
-                for (int j = j0; j <= jmax; j += ncol) {
-                    const double nb =
-                        ncol == 2 ? near_sum_v(cv, v, i, j) : nb_sum_v(cv, v, i, j);
-                    v(i, j) = av * (nb + (pf(i, j) - pf(i - 1, j)) * p.dx) / cv.AP(i, j) +
-                              (1 - av) * v(i, j);
-                }
-            }
-            // MPI: the next colour reads this colour's cells in the neighbours' halos. The
-            // omp for ended with a barrier; the master exchanges, then everyone waits for it.
-            if (p.nranks > 1) {
-#pragma omp master
-                halo_exchange(p, v);
-#pragma omp barrier
+    const Box k{row_from(p, H + 1), row_to(p, NX + H - 1), col_from(p, H + 1), col_to(p, p.NY + H)};
+    // MPI: the next colour reads this colour's cells in the neighbours' halos (colour_sweeps).
+    const auto bx = overlap_boxes(p, k, {p.row_lo, p.row_hi, p.col_lo, p.col_hi}, H);
+    auto pass = [&](int c, const Box& b) {
+#pragma omp for schedule(static) nowait
+        for (int i = b.ib; i >= b.ia; --i) {
+            int j0 = b.ja;
+            while (momentum_colour(ncol, i, j0) != c)
+                ++j0;
+            for (int j = j0; j <= b.jb; j += ncol) {
+                const double nb = ncol == 2 ? near_sum_v(cv, v, i, j) : nb_sum_v(cv, v, i, j);
+                v(i, j) = av * (nb + (pf(i, j) - pf(i - 1, j)) * p.dx) / cv.AP(i, j) +
+                          (1 - av) * v(i, j);
             }
         }
+    };
+#pragma omp parallel // one team for all sweeps and colours (T33)
+    colour_sweeps(
+        halo_mode(p), nsweeps, ncol, k, bx, pass, [&] { halo_exchange(p, v); },
+        [&] { halo_post(p, v); });
 }
 
 void sweep_v_multicolour(const Params& p, const Coeffs& cv, Field2D& v, const Field2D& pf) {

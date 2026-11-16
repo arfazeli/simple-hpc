@@ -2,6 +2,7 @@
 #include "simple/field2d.hpp"
 #include "simple/params.hpp"
 
+#include <array>
 #include <cstddef>
 #include <vector>
 
@@ -36,6 +37,64 @@ void halo_exchange(const Params& p, Field2D& f);
 // rows, which start `west` cells before x00. Neighbours from the same process grid.
 void halo_exchange_raw(const Params& p, double* x00, int nr, int nc, int stride, int west,
                        int depth);
+// Non-blocking exchange for the sweeps, which read only straight-line neighbours: all four
+// directions at once, owned cells only, corners not refreshed. halo_post starts it, halo_wait
+// finishes it; one exchange in flight at a time. Master thread only, like halo_exchange.
+void halo_post(const Params& p, Field2D& f);
+void halo_post_raw(const Params& p, double* x00, int nr, int nc, int stride, int depth);
+void halo_wait();
+
+// Inclusive cell box (empty when ia > ib or ja > jb).
+struct Box {
+    int ia, ib, ja, jb;
+};
+// Kernel box k split for overlapping a halo exchange with compute: [0] is the interior (cells at
+// least `reach` from every side of the owned box `own` that has a neighbour rank, so it reads no
+// halo), [1..4] the top, bottom, left and right strips. Together they cover k exactly once.
+std::array<Box, 5> overlap_boxes(const Params& p, const Box& k, const Box& own, int reach);
+
+// How a coloured sweep refreshes halos between colours.
+enum class Halo { None, Blocking, Overlap };
+inline Halo halo_mode(const Params& p) {
+    return p.nranks == 1 ? Halo::None : p.halo_overlap ? Halo::Overlap : Halo::Blocking;
+}
+
+// `sweeps` x `colours` passes of a coloured sweep; call from every thread of an OpenMP team.
+// pass(c, box) updates colour c's cells in box under `omp for nowait`. Cells of one colour are
+// independent, so splitting a pass into boxes gives the same bits.
+//   None:     pass over k, barrier.
+//   Blocking: pass over k, then full() (halo_exchange, corners included) after every colour.
+//   Overlap:  post() the previous colour's cells, pass over the interior bx[0] while they travel,
+//             halo_wait(), then the strips bx[1..4]; after the last colour full(), so the caller
+//             sees the same halos (corners included) as with Blocking.
+// full() and post() run on the master thread (MPI_THREAD_FUNNELED).
+template <class Pass, class Full, class Post>
+void colour_sweeps(Halo mode, int sweeps, int colours, const Box& k, const std::array<Box, 5>& bx,
+                   const Pass& pass, const Full& full, const Post& post) {
+    for (int s = 0; s < sweeps; ++s)
+        for (int c = 0; c < colours; ++c) {
+            if (mode == Halo::Overlap && (s > 0 || c > 0)) {
+#pragma omp master
+                post();
+                pass(c, bx[0]);
+#pragma omp master
+                halo_wait();
+#pragma omp barrier
+                for (int m = 1; m < 5; ++m)
+                    pass(c, bx[m]);
+            } else {
+                pass(c, k);
+            }
+#pragma omp barrier
+            if (mode == Halo::Blocking ||
+                (mode == Halo::Overlap && s == sweeps - 1 && c == colours - 1)) {
+#pragma omp master
+                full();
+#pragma omp barrier
+            }
+        }
+}
+
 // Multigrid level `shift` stored whole on every rank: x00 is its interior cell (0, 0), rows
 // `stride` apart. Each rank's block (interior_block >> shift) is sent to every rank, in place.
 // No-op on one rank.

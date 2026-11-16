@@ -112,26 +112,25 @@ void solve_pc_jacobi(const Params& p, PressureWork& w, Field2D& old) {
 }
 
 void solve_pc_redblack(const Params& p, PressureWork& w) {
-    const int H = p.H, NX = p.NX, jmin = col_from(p, H + 1), jmax = col_to(p, p.NY + H);
+    const int H = p.H, NX = p.NX;
+    const Box k{row_from(p, H), row_to(p, NX + H - 1), col_from(p, H + 1), col_to(p, p.NY + H)};
+    // MPI: the other colour (and correct) reads these cells in the neighbours' halos. The interior
+    // keeps H (the exchange depth) away from the edge, so it never writes a cell being sent.
+    const auto bx = overlap_boxes(p, k, {p.row_lo, p.row_hi, p.col_lo, p.col_hi}, H);
+    auto pass = [&](int c, const Box& b) {
+#pragma omp for schedule(static) nowait
+        for (int i = b.ib; i >= b.ia; --i) {
+            int j = H + 1 + ((i + H + 1 + c) & 1);     // first cell of colour c in the row
+            j += (std::max(0, b.ja - j) + 1) / 2 * 2; // first one in the box
+            for (; j <= b.jb; j += 2)
+                pc_update(w, w.pc, i, j);
+        }
+    };
     w.pc.fill(0.0);
 #pragma omp parallel
-    for (int k = 0; k < p.maxit_inner_p; ++k)
-        for (int c = 0; c < 2; ++c) {
-#pragma omp for schedule(static)
-            for (int i = row_to(p, NX + H - 1); i >= row_from(p, H); --i) {
-                int j = H + 1 + ((i + H + 1 + c) & 1);    // first cell of colour c in the row
-                j += (std::max(0, jmin - j) + 1) / 2 * 2; // first one in this rank's columns
-                for (; j <= jmax; j += 2)
-                    pc_update(w, w.pc, i, j);
-            }
-            // MPI: the other colour (and correct) reads these cells in the neighbours' halos.
-            // The omp for ended with a barrier; the master exchanges, then everyone waits for it.
-            if (p.nranks > 1) {
-#pragma omp master
-                halo_exchange(p, w.pc);
-#pragma omp barrier
-            }
-        }
+    colour_sweeps(
+        halo_mode(p), p.maxit_inner_p, 2, k, bx, pass, [&] { halo_exchange(p, w.pc); },
+        [&] { halo_post(p, w.pc); });
 }
 
 void correct(const Params& p, const PressureWork& w, const Field2D& APU, const Field2D& APV,
