@@ -9,7 +9,8 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(SIMPLE_OPENMP "Enable OpenMP for the independent kernels" ON)
-option(SIMPLE_HIP "Build the HIP GPU backend (T23; needs ROCm)" OFF)
+option(SIMPLE_HIP "Build the GPU backend for AMD GPUs with HIP (T23; needs ROCm)" OFF)
+option(SIMPLE_CUDA "Build the same GPU backend for NVIDIA GPUs with CUDA (needs nvcc)" OFF)
 option(SIMPLE_MPI "Build with MPI (2D block domain decomposition)" OFF)
 
 execute_process(COMMAND git rev-parse --short HEAD
@@ -26,11 +27,11 @@ add_library(simple_core STATIC ${CORE_SRC})
 target_include_directories(simple_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
 target_compile_definitions(simple_core PUBLIC SIMPLE_GIT_HASH="${SIMPLE_GIT_HASH}"
   SIMPLE_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
-# CXX only: the HIP sources (SIMPLE_HIP) get their own warning flags below.
+# CXX only: the GPU sources (SIMPLE_HIP / SIMPLE_CUDA) get their own warning flags below.
 target_compile_options(simple_core PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Werror>)
 # No FMA contraction, so results are reproducible across compilers and the snapshot tests can
-# compare bit for bit.
-target_compile_options(simple_core PUBLIC -ffp-contract=off)
+# compare bit for bit. Not for CUDA: nvcc spells it --fmad=false (set on simple_gpu below).
+target_compile_options(simple_core PUBLIC $<$<COMPILE_LANGUAGE:CXX,HIP>:-ffp-contract=off>)
 
 if(SIMPLE_OPENMP)
   find_package(OpenMP COMPONENTS CXX)
@@ -50,18 +51,41 @@ if(SIMPLE_MPI)
   target_compile_definitions(simple_core PUBLIC SIMPLE_MPI)
 endif()
 
+# GPU backend: one HIP source, built by the HIP compiler (AMD) or as CUDA by nvcc (NVIDIA).
+if(SIMPLE_HIP AND SIMPLE_CUDA)
+  message(FATAL_ERROR "SIMPLE_HIP and SIMPLE_CUDA are exclusive: one GPU vendor per build")
+endif()
+set(GPU_SRC ${CMAKE_SOURCE_DIR}/src/hip/solver_hip.hip)
 if(SIMPLE_HIP)
   if(NOT DEFINED CMAKE_HIP_ARCHITECTURES)
     set(CMAKE_HIP_ARCHITECTURES gfx942) # MI300A
   endif()
   enable_language(HIP)
   find_package(hip REQUIRED CONFIG)
-  add_library(simple_hip STATIC ${CMAKE_SOURCE_DIR}/src/hip/solver_hip.hip)
-  target_link_libraries(simple_hip PUBLIC simple_core hip::host)
-  # ponytail: no -Werror on HIP yet, so a new compiler warning costs no cluster round trip.
-  target_compile_options(simple_hip PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-Wall -Wextra>)
-  target_link_libraries(simple PRIVATE simple_hip)
-  target_compile_definitions(simple PRIVATE SIMPLE_HIP)
+  add_library(simple_gpu STATIC ${GPU_SRC})
+  target_link_libraries(simple_gpu PUBLIC simple_core hip::host)
+  # ponytail: no -Werror on GPU code yet, so a new compiler warning costs no cluster round trip.
+  target_compile_options(simple_gpu PRIVATE $<$<COMPILE_LANGUAGE:HIP>:-Wall -Wextra>)
+elseif(SIMPLE_CUDA)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 90) # H100
+  endif()
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  set_source_files_properties(${GPU_SRC} PROPERTIES LANGUAGE CUDA)
+  add_library(simple_gpu STATIC ${GPU_SRC})
+  target_link_libraries(simple_gpu PUBLIC simple_core CUDA::cudart)
+  target_compile_definitions(simple_gpu PRIVATE SIMPLE_CUDA)
+  set_target_properties(simple_gpu PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+  # --fmad=false: no FMA contraction (nvcc fuses a*b+c by default), so the kernels round exactly
+  # like the CPU code and the GPU tests can compare bit for bit. The host pass has no OpenMP, so
+  # the CPU-side pragmas in shared headers (Field2D first touch) are ignored here, by design.
+  target_compile_options(simple_gpu PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false -Xcompiler=-Wall,-Wextra,-Wno-unknown-pragmas>)
+endif()
+if(SIMPLE_HIP OR SIMPLE_CUDA)
+  target_link_libraries(simple PRIVATE simple_gpu)
+  target_compile_definitions(simple PRIVATE SIMPLE_GPU)
   set_target_properties(simple PROPERTIES LINKER_LANGUAGE CXX)
 endif()
 
@@ -139,9 +163,9 @@ if(SIMPLE_MPI)
   endforeach()
 endif()
 
-if(SIMPLE_HIP)
+if(SIMPLE_HIP OR SIMPLE_CUDA) # CPU-vs-GPU tests, plain C++ against either vendor's build
   add_executable(simple_hip_tests ${CMAKE_SOURCE_DIR}/tests/hip/test_hip.cpp)
-  target_link_libraries(simple_hip_tests PRIVATE simple_hip Catch2::Catch2WithMain)
+  target_link_libraries(simple_hip_tests PRIVATE simple_gpu Catch2::Catch2WithMain)
   target_include_directories(simple_hip_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests)
   target_compile_definitions(simple_hip_tests PRIVATE SIMPLE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   set_target_properties(simple_hip_tests PROPERTIES LINKER_LANGUAGE CXX)
