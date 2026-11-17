@@ -1,4 +1,5 @@
-// T23: HIP backend against the CPU kernels. Built only with -DSIMPLE_HIP=ON; needs a GPU.
+// T23: GPU backend against the CPU kernels. Built only with -DSIMPLE_HIP=ON or -DSIMPLE_CUDA=ON;
+// needs a GPU.
 #include "simple/momentum_u.hpp"
 #include "simple/momentum_v.hpp"
 #include "simple/solver_hip.hpp"

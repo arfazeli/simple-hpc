@@ -1,9 +1,10 @@
 // STREAM-style triad a = b + s*c on the GPU: the device memory-bandwidth ceiling for T24.
-// Build: hipcc -O3 --offload-arch=gfx942 bench/stream_hip.hip -o build-hip/stream_hip
+// Build: hipcc -O3 --offload-arch=gfx942 -Iinclude bench/stream_hip.hip -o build-hip/stream_hip
+//    or: nvcc -O3 -arch=sm_90 -x cu -DSIMPLE_CUDA -Iinclude bench/stream_hip.hip -o build-cuda/stream_hip
 // Usage: stream_hip [N]   (default 2^27 doubles = 1 GiB per array)
 // Prints "kernel,GB_per_s" for copy (2 arrays) and triad (3 arrays): best of 20, no
 // write-allocate traffic counted, as in STREAM.
-#include <hip/hip_runtime.h>
+#include "simple/gpu_runtime.hpp"
 
 #include <cstdio>
 #include <cstdlib>

@@ -1,11 +1,13 @@
-// HIP backend (T23). Each kernel is a one-thread-per-cell copy of a CPU loop body; expressions are
+// GPU backend (T23), written in HIP; also builds as CUDA for NVIDIA GPUs (SIMPLE_CUDA, see
+// simple/gpu_runtime.hpp). Each kernel is a one-thread-per-cell copy of a CPU loop body; expressions are
 // copied verbatim from src/coefficients.cpp, momentum_u.cpp, momentum_v.cpp and pressure.cpp so
-// the per-cell rounding is identical (built with -ffp-contract=off, like simple_core).
+// the per-cell rounding is identical (no FMA contraction: -ffp-contract=off for HIP, --fmad=false
+// for CUDA, like simple_core).
 #include "simple/solver_hip.hpp"
 
 #include "simple/momentum_u.hpp" // momentum_colours
 
-#include <hip/hip_runtime.h>
+#include "simple/gpu_runtime.hpp"
 
 #include <cstdio>
 #include <stdexcept>
@@ -16,7 +18,7 @@
     do {                                                                                        \
         hipError_t e_ = (x);                                                                    \
         if (e_ != hipSuccess)                                                                   \
-            throw std::runtime_error(std::string("HIP error: ") + hipGetErrorString(e_) +      \
+            throw std::runtime_error(std::string("GPU error: ") + hipGetErrorString(e_) +      \
                                      " in " #x);                                                \
     } while (0)
 
@@ -536,7 +538,11 @@ void HipSolver::download(State& s) const {
 RunResult run_simple_hip(const Params& p, State& s) {
     hipDeviceProp_t prop;
     HIP_CHECK(hipGetDeviceProperties(&prop, 0));
+#ifdef SIMPLE_CUDA
+    std::printf("gpu: %s (sm_%d%d)\n", prop.name, prop.major, prop.minor);
+#else
     std::printf("gpu: %s (%s)\n", prop.name, prop.gcnArchName);
+#endif
     HipSolver g(p, s);
     RunResult out = run_outer_loop(p, [&](PhaseTimers& t) { return g.outer_iteration(t); });
     g.download(s);

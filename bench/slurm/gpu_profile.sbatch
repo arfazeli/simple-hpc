@@ -31,7 +31,7 @@ cmake -S . -B build-hip -DCMAKE_BUILD_TYPE=Release -DSIMPLE_HIP=ON -DCMAKE_PREFI
 cmake --build build-hip -j 8 --target simple simple_hip_tests > "$OUT/build.log" 2>&1 ||
     { grep -m1 -A20 error "$OUT/build.log"; exit 1; }
 build-hip/simple_hip_tests 2>&1 | tail -n 2
-hipcc -O3 --offload-arch=gfx942 bench/stream_hip.hip -o build-hip/stream_hip
+hipcc -O3 --offload-arch=gfx942 -Iinclude bench/stream_hip.hip -o build-hip/stream_hip
 fi
 
 has stream && { step "device STREAM (3 x 1 GiB)"; build-hip/stream_hip | tee "$OUT/stream_hip.csv"; }

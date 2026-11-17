@@ -3,7 +3,7 @@
 #include "simple/params.hpp"
 #include "simple/solver.hpp"
 
-#ifdef SIMPLE_HIP
+#ifdef SIMPLE_GPU
 #include "simple/solver_hip.hpp"
 #endif
 
@@ -38,10 +38,11 @@ int main(int argc, char** argv) {
             State s(p);
             RunResult r;
             if (p.backend == Backend::GPU) {
-#ifdef SIMPLE_HIP
+#ifdef SIMPLE_GPU
                 r = run_simple_hip(p, s);
 #else
-                throw std::runtime_error("backend = gpu needs a build with -DSIMPLE_HIP=ON");
+                throw std::runtime_error(
+                    "backend = gpu needs a build with -DSIMPLE_HIP=ON or -DSIMPLE_CUDA=ON");
 #endif
             } else {
                 r = run_simple(p, s);

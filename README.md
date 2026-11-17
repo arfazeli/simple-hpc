@@ -19,7 +19,7 @@ ctest --test-dir build -LE ghia      # fast tests; -L ghia runs the validation (
 build/simple configs/validation/re1000_128.cfg
 ```
 
-OpenMP is on by default. GPU backend: add `-DSIMPLE_HIP=ON` (ROCm, default target gfx942). Cluster jobs are in `bench/slurm/`.
+OpenMP is on by default. GPU backend: add `-DSIMPLE_HIP=ON` for AMD (ROCm, default target gfx942) or `-DSIMPLE_CUDA=ON` for NVIDIA (nvcc, default target sm_90); both build the same source in `src/hip/`. Cluster jobs are in `bench/slurm/`.
 
 ## License
 
