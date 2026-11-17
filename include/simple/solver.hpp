@@ -34,6 +34,10 @@ struct RunResult {
     double seconds = 0.0;
     PhaseTimers timers; // filled by run_simple; write_outputs adds Output on a copy
     long long cg_iterations = 0; // pressure_solver = cg: CG iterations summed over outer iterations
+    // > 1 MPI rank: comm_times() over ranks, set by main: halo mean, halo max, collective mean,
+    // collective max (s).
+    std::array<double, 4> comm{};
+    int ranks = 1; // MPI ranks the run used (set by main)
 };
 
 RunResult run_simple(const Params& p, State& s);

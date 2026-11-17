@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <map>
 #include <stdexcept>
@@ -13,6 +14,20 @@
 #ifdef SIMPLE_MPI
 #include <mpi.h>
 #endif
+
+static CommTimes g_comm;
+CommTimes& comm_times() { return g_comm; }
+
+namespace {
+// Adds the scope's wall time to `acc` (one of g_comm's fields).
+struct CommTimer {
+    double& acc;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    ~CommTimer() {
+        acc += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    }
+};
+} // namespace
 
 // Part k of `parts` of an index range [0, total) whose interior is n indices starting at `first`:
 // interior indices are split in units of `unit` (n % unit == 0) as evenly as possible (the first
@@ -155,6 +170,7 @@ static void add_rows(const std::vector<double>& rows, int k, double* out) {
 }
 
 void CellSums::sum(const Params& p, double* out) const {
+    CommTimer timer{g_comm.collective};
     const int nr = std::max(0, ib - ia + 1), n = nr * k;
     std::vector<double> part(n, 0.0); // row partials: 0.0, or what the west neighbour reached
     if (!d_) {
@@ -273,6 +289,7 @@ void halo_exchange_raw(const Params& p, double* x00, int nr, int nc, int stride,
                        int depth) {
     if (p.nranks == 1)
         return;
+    CommTimer timer{g_comm.halo};
     MPI_Request req[4];
     // Tags: 0 south-going, 1 north-going, 2 east-going, 3 west-going.
     if (p.grid_cols > 1) { // east/west: `depth` columns of the owned rows
@@ -318,6 +335,7 @@ static int g_nreq = 0;
 void halo_post_raw(const Params& p, double* x00, int nr, int nc, int stride, int depth) {
     if (p.nranks == 1)
         return;
+    CommTimer timer{g_comm.halo};
     if (g_nreq != 0)
         throw std::logic_error("halo_post: an exchange is already in flight");
     // Tags as in halo_exchange_raw. Every message is owned cells only, so no send buffer overlaps
@@ -356,6 +374,7 @@ void halo_post(const Params& p, Field2D& f) {
 }
 
 void halo_wait() {
+    CommTimer timer{g_comm.halo};
     MPI_Waitall(g_nreq, g_req, MPI_STATUSES_IGNORE);
     g_nreq = 0;
 }
@@ -363,6 +382,7 @@ void halo_wait() {
 void allgather_level(const Params& p, int shift, double* x00, int stride) {
     if (p.nranks == 1)
         return;
+    CommTimer timer{g_comm.collective};
     std::vector<int> box(4 * static_cast<std::size_t>(p.nranks)), counts(p.nranks),
         displs(p.nranks);
     int total = 0;

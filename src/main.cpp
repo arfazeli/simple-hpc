@@ -46,14 +46,26 @@ int main(int argc, char** argv) {
             } else {
                 r = run_simple(p, s);
             }
+            r.ranks = nranks;
+#ifdef SIMPLE_MPI
+            if (nranks > 1) {
+                const CommTimes& ct = comm_times();
+                double mine[2] = {ct.halo, ct.collective}, sum[2], max[2];
+                MPI_Reduce(mine, sum, 2, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+                MPI_Reduce(mine, max, 2, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+                r.comm = {sum[0] / nranks, max[0], sum[1] / nranks, max[1]};
+            }
+#endif
             if (nranks == 1) {
                 write_outputs(p, s.u, s.v, s.p, r, argv[1]);
             } else { // rank 0 gathers the three output fields (only rank 0 allocates them)
-                const int rows = rank == 0 ? global.nrows : 0;
+                const int rows = rank == 0 && p.write_fields ? global.nrows : 0;
                 Field2D u(rows, global.ncols), v(rows, global.ncols), pf(rows, global.ncols);
-                gather_field(p, s.u, u);
-                gather_field(p, s.v, v);
-                gather_field(p, s.p, pf);
+                if (p.write_fields) {
+                    gather_field(p, s.u, u);
+                    gather_field(p, s.v, v);
+                    gather_field(p, s.p, pf);
+                }
                 if (rank == 0)
                     write_outputs(global, u, v, pf, r, argv[1]);
             }

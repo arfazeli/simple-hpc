@@ -44,6 +44,15 @@ void halo_post(const Params& p, Field2D& f);
 void halo_post_raw(const Params& p, double* x00, int nr, int nc, int stride, int depth);
 void halo_wait();
 
+// Wall time this rank has spent communicating, for the scaling study: `halo` = halo_exchange(_raw),
+// halo_post(_raw) and halo_wait (so with overlap only the part not hidden behind compute);
+// `collective` = CellSums::sum (row-partial chain + Allgatherv) and allgather_level. Both are parts
+// of the solver phases, not extra phases. Only reported when nranks > 1; master thread only.
+struct CommTimes {
+    double halo = 0.0, collective = 0.0;
+};
+CommTimes& comm_times();
+
 // Inclusive cell box (empty when ia > ib or ja > jb).
 struct Box {
     int ia, ib, ja, jb;

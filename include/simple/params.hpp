@@ -52,6 +52,9 @@ struct Params {
     int mg_split = 0;
     // > 1 rank: overlap the halo exchanges inside coloured sweeps with the interior update.
     bool halo_overlap = true;
+    // False: skip the field CSVs (u, v, p, centrelines) and their MPI gather; alog, timing and
+    // run_info are still written. For timing runs, where 8192² fields are GBs per run.
+    bool write_fields = true;
 };
 
 // Clamp a kernel's global row / column range [a, b] to the cells this rank owns.

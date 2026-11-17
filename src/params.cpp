@@ -56,7 +56,7 @@ Params make_params(const ConfigMap& cfg) {
         "diffusion_order",  "Hybrid_switch",   "backend",
         "momentum_solver",  "pressure_solver", "output_dir", "residual_normalisation",
         "pressure_tolerance", "pressure_maxit", "mg_cycles", "mg_pre", "mg_post", "mg_omega",
-        "mpi_grid", "halo_overlap"};
+        "mpi_grid", "halo_overlap", "write_fields"};
     for (auto& kv : cfg)
         if (!known.count(kv.first))
             throw std::runtime_error("unknown config key: " + kv.first);
@@ -136,6 +136,8 @@ Params make_params(const ConfigMap& cfg) {
             p.mg_omega = to_double(k, v);
         else if (k == "halo_overlap")
             p.halo_overlap = to_bool(k, v);
+        else if (k == "write_fields")
+            p.write_fields = to_bool(k, v);
         else if (k == "mpi_grid" && v != "auto") { // RxC, e.g. 2x2
             const std::size_t x = v.find('x');
             if (x == std::string::npos)
@@ -208,5 +210,6 @@ void print_params(std::ostream& os, const Params& p) {
        << "\npressure_maxit = " << p.pressure_maxit << "\nmg_cycles = " << p.mg_cycles
        << "\nmg_pre = " << p.mg_pre << "\nmg_post = " << p.mg_post
        << "\nmg_omega = " << p.mg_omega
-       << "\nhalo_overlap = " << (p.halo_overlap ? "True" : "False") << "\n";
+       << "\nhalo_overlap = " << (p.halo_overlap ? "True" : "False")
+       << "\nwrite_fields = " << (p.write_fields ? "True" : "False") << "\n";
 }

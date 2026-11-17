@@ -48,13 +48,15 @@ void write_outputs(const Params& p, const Field2D& u, const Field2D& v, const Fi
     {
     ScopedTimer out_timer(timers, Phase::Output);
     fs::create_directories(p.output_dir);
-    write_csv((d / "u.csv").string(), u);
-    write_csv((d / "v.csv").string(), v);
-    write_csv((d / "p.csv").string(), pf);
-    Field2D ux, uy;
-    cell_centre(p, u, v, ux, uy);
-    write_csv((d / "ux_centre.csv").string(), ux);
-    write_csv((d / "uy_centre.csv").string(), uy);
+    if (p.write_fields) {
+        write_csv((d / "u.csv").string(), u);
+        write_csv((d / "v.csv").string(), v);
+        write_csv((d / "p.csv").string(), pf);
+        Field2D ux, uy;
+        cell_centre(p, u, v, ux, uy);
+        write_csv((d / "ux_centre.csv").string(), ux);
+        write_csv((d / "uy_centre.csv").string(), uy);
+    }
 
     std::FILE* al = std::fopen((d / "alog.csv").string().c_str(), "w");
     if (!al)
@@ -137,6 +139,11 @@ void write_outputs(const Params& p, const Field2D& u, const Field2D& v, const Fi
     std::fprintf(fp, "  \"cg_iterations_total\": %lld,\n  \"cg_iterations_mean\": %.6f,\n",
                  r.cg_iterations,
                  r.iterations > 0 ? static_cast<double>(r.cg_iterations) / r.iterations : 0.0);
+    std::fprintf(fp, "  \"ranks\": %d,\n", r.ranks);
+    std::fprintf(fp, "  \"halo_seconds_mean\": %.6f,\n  \"halo_seconds_max\": %.6f,\n", r.comm[0],
+                 r.comm[1]);
+    std::fprintf(fp, "  \"collective_seconds_mean\": %.6f,\n  \"collective_seconds_max\": %.6f,\n",
+                 r.comm[2], r.comm[3]);
     std::fprintf(fp, "  \"iterations\": %d,\n  \"converged\": %s,\n  \"seconds\": %.6f,\n  \"seconds_per_iteration\": %.9f\n}\n",
                  r.iterations, r.converged ? "true" : "false", r.seconds,
                  r.iterations > 0 ? r.seconds / r.iterations : 0.0);
