@@ -303,22 +303,34 @@ def fig_gpu_kernels(results, path):
     plt.close(fig)
 
 
-# Ghia Re1000 128² to convergence (5919 outer iterations), multicolour GS + red-black p',
-# identical residual history: bench/slurm/logs/simple-gpu-test-26745839.out (T23).
-GPU_VS_CPU = [("MI300A node: 8 CPU cores (OpenMP)", 5.83), ("same node: 1 MI300A GPU (HIP)", 2.19)]
+# Ghia Re1000 128² to convergence (5919 outer iterations), multicolour GS + red-black p', one
+# source built with HIP (MI300A) and CUDA (H100), same iterations and rms errors on every device.
+# Single runs: bench/slurm/logs/simple-gpu-test-27666007.out (MI300A node) and -27666004.out (H100
+# node), both at 03a74b6 + the CUDA source. The two nodes have different CPUs, so each GPU is only
+# compared with the 8 CPU cores of its own node.
+GPU_VS_CPU = [  # (node, label, seconds, is_gpu)
+    ("MI300A node", "8 CPU cores (OpenMP)", 6.07, False),
+    ("MI300A node", "AMD MI300A (HIP)", 2.17, True),
+    ("H100 node", "8 CPU cores (OpenMP)", 2.88, False),
+    ("H100 node", "NVIDIA H100 (CUDA)", 1.79, True),
+]
 
 
 def fig_gpu_vs_cpu(path):
-    fig, ax = plt.subplots(figsize=(6.4, 2.2))
-    names = [n for n, _ in GPU_VS_CPU][::-1]
-    secs = [s for _, s in GPU_VS_CPU][::-1]
-    ax.barh(names, secs, height=0.55, color=[SERIES[1], SERIES[0]], zorder=3)
-    ax.text(secs[1] + 0.08, 1, f"{secs[1]:.2f} s", va="center", fontsize=9, color=INK)
-    ax.text(secs[0] + 0.08, 0, f"{secs[0]:.2f} s  ({secs[1] / secs[0]:.1f}× faster)",
-            va="center", fontsize=9, color=INK)
-    ax.set_xlim(0, max(secs) * 1.25)
+    fig, ax = plt.subplots(figsize=(6.6, 2.9))
+    rows = GPU_VS_CPU[::-1]
+    y = list(range(len(rows)))
+    ax.barh(y, [r[2] for r in rows], height=0.6, zorder=3,
+            color=[SERIES[0] if r[3] else SERIES[1] for r in rows])
+    ax.set_yticks(y, [f"{r[0]}: {r[1]}" for r in rows], fontsize=8)
+    cpu = {r[0]: r[2] for r in GPU_VS_CPU if not r[3]}
+    for k, r in zip(y, rows):
+        note = f"  ({cpu[r[0]] / r[2]:.1f}× its node's CPU)" if r[3] else ""
+        ax.text(r[2] + 0.08, k, f"{r[2]:.2f} s{note}", va="center", fontsize=8, color=INK)
+    ax.set_xlim(0, max(r[2] for r in rows) * 1.45)
     ax.set_xlabel("time to converged solution, Re 1000, 128² (seconds)", color=INK)
-    ax.set_title("GPU port (T23): same algorithm, same 5919 iterations", color=INK, fontsize=10)
+    ax.set_title("One GPU source on AMD and NVIDIA: same 5919 iterations, same answer", color=INK,
+                 fontsize=10)
     style(ax)
     ax.grid(False, axis="y")
     fig.savefig(path, dpi=DPI, bbox_inches="tight")

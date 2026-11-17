@@ -321,3 +321,94 @@ rocprofv3 (ROCm 7.2) on one MI300A, `gs_multicolour` + `gs_redblack`, before any
 - **Counter caveat.** `FETCH_SIZE` counts L2-miss traffic (128 B requests; it agrees with 2 × 64 × `TCC_EA0_RDREQ_sum`), part of which MI300A's 256 MB Infinity Cache serves before HBM. Writes match the minimum footprint (e.g. `k_correct` writes 105 MB for u, v, p = 3 × 33.6 MB). Reads in the sweeps and residuals are about 2× the arrays they touch, cause not yet pinned down (6 separate XCD L2 caches, unaligned rows). Running `stream_hip` under the same counters calibrates this.
 - **512² is latency-bound, not launch-gap-bound.** The GPU is busy 79 % of 0.98 ms per iteration. Each small kernel still takes 5–13 µs, so HIP graphs can recover at most the ~21 % idle time plus the host syncs (wall time is 1.10 ms).
 - rocprof-compute's roofline did not run: its Python dependencies (dash, kaleido, textual, …) are not installed on the node. With a few flops per 8-byte value loaded, every kernel sits far left of the ridge point anyway, so the measured GB/s against STREAM is the useful number.
+
+## One GPU source for AMD and NVIDIA (CUDA build)
+
+The HIP backend now also builds as CUDA (`-DSIMPLE_CUDA=ON`): `include/simple/gpu_runtime.hpp` maps the 18 HIP runtime calls the code uses to their CUDA names, and nvcc compiles the same `src/hip/solver_hip.hip` with `--fmad=false` (the CUDA spelling of `-ffp-contract=off`). No kernel changed: there are no warp shuffles or wavefront-size assumptions, and the block reductions use shared memory with a barrier per step, so they are correct for 32- and 64-wide warps alike. nibi jobs 27666004 (NVIDIA H100 80GB HBM3, CUDA 12.6) and 27666007 (AMD MI300A, ROCm 7.2), same source, `bench/slurm/gpu_test.sbatch`.
+
+- **Bit-identical on both vendors.** All 4 CPU-vs-GPU test cases (76 assertions) pass on the H100 as on the MI300A: every phase of the outer iteration matches the CPU kernels bit for bit, as do u, v, p after 200 outer iterations. Ghia Re1000 converges in the same 3718 (80²) and 5919 (128²) iterations with the same rms errors (0.01698 / 0.00825 and 0.01257 / 0.01093) on the CPU, the MI300A and the H100.
+- **Speed, single runs** (not yet a tuned or repeated comparison):
+
+| | NVIDIA H100 | AMD MI300A |
+|---|---|---|
+| device STREAM copy / triad (1 GiB arrays) | 2862 / 2939 GB/s | 3878 / 3504 GB/s |
+| Ghia Re1000 128² to convergence | **1.79 s** | 2.17 s |
+| same case, 8 CPU cores of that node | 2.88 s | 6.07 s |
+| 512² per outer iteration | **0.51 ms** | 1.10 ms |
+| 2048² per outer iteration | **7.8 ms** | 10.2 ms (8.5 ms in the T24 profile) |
+
+![Time to solution on both GPUs](figures/performance/hpc/gpu_vs_cpu.png)
+
+- **512² is launch-bound, and the H100 is about 2× faster there.** The T24 profile showed about 70 small kernel launches per outer iteration at this size, each taking 5–13 µs on the MI300A; the H100's per-launch cost is evidently lower.
+- **At 2048² the H100 is faster despite about 20 % less measured bandwidth.** The T24 profile found the MI300A sweeps reading about 2× the bytes of the arrays they touch, so the likely difference is how each GPU's caches handle the colour-strided access, not raw bandwidth. Unconfirmed until both are profiled (Nsight Compute on the H100 next to the rocprofv3 data). The colour-major coefficient storage planned in T24a cuts those bytes on both vendors.
+- The CPU rows are for context only: the two nodes have different CPUs, so each GPU is compared only with the 8 cores of its own node.
+
+## MPI: domain decomposition across nodes (T39–T46)
+
+2D block decomposition (`mpi_grid = auto` or `RxC`), 2-cell halos, deterministic row-sum reductions, and an MPI path for every pressure solver but `gs_lex` (multigrid: decomposed fine levels, coarse level gathered onto every rank). Hybrid MPI+OpenMP with `MPI_THREAD_FUNNELED`.
+
+### Correctness
+
+- **Byte-identical to one rank.** u, v, p and the residual log match the single-rank run bit for bit on process grids 1×2, 2×1, 1×4, 2×2 and 4×1 across 2 nodes (1 and 4 OpenMP threads per rank), for QUICK/4 and UDS/2, `jacobi`, `cg` and `mg`, with halo overlap on and off (nibi jobs 27500792, 27502683, 27547609). Locally also on 3 and 6 ranks.
+- **Ghia Re1000 128², `mg`, 4 ranks:** converged in 4703 iterations, rms u / v 0.01255 / 0.01090 (job 27500794), the same accuracy as the serial and GPU runs.
+
+### Overlapping halo exchange with compute (T45)
+
+Coloured sweeps post non-blocking, corner-free halo messages for the previous colour, update the interior cells while they travel, then the boundary strips (`halo_overlap`, default on). Job 27503705: 64 ranks on 2 nodes (32 per node, 1 thread), `mg`, overlap on and off alternating, 3 repeats each, before the balanced split below.
+
+| grid | overlap on | off | change |
+|---|---|---|---|
+| 1024² × 1000 it | 5.56 s | 5.70 s | within noise (one slow "off" run) |
+| 2048² × 300 it | 8.67 s | 8.62 s | within noise |
+| 4096² × 100 it | **13.71 s** | 13.98 s | **1.9 % faster**, every "on" run below every "off" run |
+
+The gain needs blocks large enough for the interior update to cover the message time (512² cells per rank at 4096², 128² at 1024²). Kept: it never measurably costs time and results stay byte-identical.
+
+### Scaling on up to 4 nodes (T46)
+
+nibi CPU nodes: 2 × Intel Xeon 6972P, 192 cores and 6 NUMA domains (SNC3) per node, whole nodes (`--exclusive`), GCC 12.3, Open MPI 4.1.5. Cavity Re1000, QUICK/4, `gs_multicolour` + `mg`, fixed iterations (4096² × 100, 8192² × 50, weak 2048² per node × 200), `write_fields = False`, halo overlap on. Two layouts: **hybrid** (one rank per NUMA domain, 32 OpenMP threads each, `OMP_PLACES=cores OMP_PROC_BIND=close`) and **pure MPI** (one rank per core). Median of 3; repeats within a job agree to a few percent. Jobs 27660679–27660681 at c6c50f1 (`bench/slurm/mpi_scaling.sbatch`, figures from `postprocess/plot_mpi.py`). The 8-node job is still queued.
+
+**Strong scaling** (solver seconds):
+
+| grid | layout | 1 node | 2 nodes | 4 nodes | speedup at 4 |
+|---|---|---|---|---|---|
+| 4096² | hybrid (6 × 32) | 5.82 | 3.05 | 1.29 | **4.5×** |
+| 4096² | pure MPI (192 × 1) | 6.31 | 3.18 | 1.53 | 4.1× |
+| 8192² | hybrid | 18.35 | 8.62 | 3.43 | **5.3×** |
+| 8192² | pure MPI | 18.43 | 9.59 | 3.66 | 5.0× |
+
+**Weak scaling** (2048² cells per node: 2048², 4096 × 2048, 4096²):
+
+| layout | 1 node | 2 nodes | 4 nodes | efficiency at 2 / 4 |
+|---|---|---|---|---|
+| hybrid | 1.98 s | 2.17 s | 2.41 s | **91 % / 82 %** |
+| pure MPI | 1.83 s | 2.23 s | 2.99 s | 82 % / 61 % |
+
+![MPI strong scaling](figures/performance/mpi/mpi_strong.png)
+![MPI weak scaling](figures/performance/mpi/mpi_weak.png)
+
+- **Superlinear strong scaling comes from per-node problem size, not from the code beating ideal.** The cost per cell per iteration on a node falls as its share of the grid shrinks: 5.5 ns at 67M cells per node (8192², 1 node), 3.5 ns at 17M (4096², 1 node). 8192² on 4 nodes has the same 17M cells per node and costs 4.1 ns; the 0.6 ns difference is communication. The same effect as the cache-resident grids in T36.
+- **Hybrid wins, and the margin grows with node count.** Pure MPI's collectives (row-sum reductions and the multigrid coarse-level gather, which every rank receives in full) grow with the rank count: at 4 nodes they take 31 % of the 8192² time with 768 ranks against 14 % with 24 hybrid ranks, and 46 % of the pure-MPI weak-scaling time.
+- **Run-to-run variation between jobs is larger than within a job.** Pure-MPI cases whose decomposition did not change between the two scaling jobs moved by up to 11 % (weak, 1 node: 1.64 → 1.83 s), presumably from different node allocations. Differences under about 10 % between separate jobs are not significant.
+
+### Balanced multigrid split: diagnosing halo wait (T46)
+
+The first scaling jobs (27632545–27632547, ceaa71d) showed halo times far above what the network costs: 2.9 s mean and 7.1 s max over ranks for 8192² on one node, where no message crosses the network. Cause: multigrid needs rank boundaries on multiples of `2^D` cells, and `D` was always the deepest valid level. With power-of-two grids and rank counts containing a factor of 3 (6 NUMA domains, 192 cores), that left the blocks 12.5 % uneven (e.g. 3072 / 3072 / 2048 of 8192 rows), and the smaller ranks idled at every halo exchange waiting for the larger ones. A third of the time on a third of the ranks predicts 6.8 s max and 2.3 s mean, against 7.1 s and 2.9 s measured. The split level is now the one with the least per-rank work (largest block plus the gathered coarse level), which brings the hybrid layouts to 0.8–3 % imbalance; results stay byte-identical.
+
+| hybrid | 1 node | 2 nodes | 4 nodes |
+|---|---|---|---|
+| 4096², before → after | 6.86 → **5.82 s** | 3.43 → **3.05** | 1.55 → **1.29** |
+| 8192², before → after | 20.50 → **18.35** | 9.92 → **8.62** | 3.92 → **3.43** |
+| 8192² halo time, 1 node, mean / max | 2.89 / 7.12 → **0.74 / 1.08 s** | | |
+
+- All nine hybrid cases are 10–17 % faster, and the max halo time is now within 1.1–1.4× of the mean. The scaling ratios barely moved (weak efficiency 92 / 81 % before, 91 / 82 % after), because the same 12.5 % slowed every node count.
+- Pure MPI mostly keeps its 12.5 %. Its blocks are small (about 22K cells at 768 ranks of 4096²), so balancing them would mean every rank gathering and solving a coarse level several times larger than its own block. That is a real cost of gathering the coarse level onto every rank. The one pure-MPI case that changed split (8192² on 192 ranks, now 3.1 %) is 7 % faster.
+
+### Where the time goes
+
+Each rank times its halo exchanges (blocking exchange, post and wait: with overlap, only the part not hidden) and its collectives (`CellSums::sum`, `allgather_level`); `run_info.json` records the mean and max over ranks.
+
+![Time split at 8192²](figures/performance/mpi/mpi_comm.png)
+
+- Hybrid 8192²: compute 93 % on one node (halo 4 %, collectives 3 %), 72 % on four (halo 15 %, collectives 14 %). That is real communication growing with node count now, not idle time.
+- **Ping-pong between two nodes** (`bench/mpi_pingpong.cpp`): 2.4 µs latency, 24 GB/s bandwidth. A 2-cell-deep halo row message at 8192² on 4 nodes (32 KB) should cost about 4 µs, yet the halo time is about 10 ms per outer iteration. Each iteration makes many small exchanges (one per colour per sweep and per multigrid level), so latency and synchronisation dominate, not bandwidth. Exchanges per iteration are not counted yet, so the per-iteration α–β prediction is still open.

@@ -131,7 +131,7 @@ def fig_comm(med, path, grid):
     ax.set(ylabel="fraction of solver time (rank mean)", ylim=(0, 1),
            title=f"Where the time goes, {grid.split('x')[0]}² strong scaling")
     style(ax)
-    ax.legend(frameon=False, fontsize=8, loc="lower left")
+    ax.legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=3)
     fig.savefig(path, dpi=DPI, bbox_inches="tight")
 
 
