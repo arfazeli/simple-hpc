@@ -57,19 +57,32 @@ void interior_block(const Params& p, int r, int& I0, int& nI, int& J0, int& nJ) 
     nJ = std::min(chi, p.NY + p.H) - p.H - 1 - J0 + 1;
 }
 
-// Decomposed MG levels for a pr x pc grid: the largest D >= 1 such that every rank owns at least
+// Decomposed MG levels for a pr x pc grid. A level D >= 1 is valid if every rank owns at least
 // one 2^D unit in each direction, at least H level-0 cells, and at least kMgAggMin cells per side
-// on level D-1. 0 if there is none. ponytail: a larger D means coarser units, so up to one unit of
-// level-0 imbalance (e.g. 48/48/32 rows of 128 on 3 ranks); cap D if that shows in the timings.
+// on level D-1. Coarse units (large D) leave up to one unit of level-0 imbalance (e.g. 3072/3072/
+// 2048 rows of 8192 on 3 ranks, 12.5 %, and every rank waits for the largest block); fine units
+// balance the blocks but make level D, which every rank gathers and solves, bigger. So pick the
+// valid D with the least per-rank work: largest block's level-0 cells + level D's cells (ties to
+// the larger D). 0 if no D is valid.
+// ponytail: the gathered level is weighted like level-0 cells although only the p' solve touches
+// it, so this errs towards coarse units; weight it by the measured solve_p share if that matters.
 constexpr int kMgAggMin = 4;
 static int mg_split_levels(const Params& p, int pr, int pc) {
     const int nl = static_cast<int>(mg_level_dims(p.NX, p.NY).size());
     int best = 0;
+    double best_work = 0.0;
     for (int d = 1; d < nl; ++d) {
-        const int ur = (p.NX >> d) / pr, uc = (p.NY >> d) / pc; // fewest units on a rank
-        if (ur >= 1 && uc >= 1 && (ur << d) >= p.H && (uc << d) >= p.H && 2 * ur >= kMgAggMin &&
-            2 * uc >= kMgAggMin)
+        const int nr = p.NX >> d, nc = p.NY >> d; // level d, also the units per direction
+        const int ur = nr / pr, uc = nc / pc;     // fewest units on a rank
+        if (!(ur >= 1 && uc >= 1 && (ur << d) >= p.H && (uc << d) >= p.H && 2 * ur >= kMgAggMin &&
+              2 * uc >= kMgAggMin))
+            continue;
+        const double big = double((nr + pr - 1) / pr << d) * double((nc + pc - 1) / pc << d);
+        const double work = big + double(nr) * nc;
+        if (best == 0 || work <= best_work) {
             best = d;
+            best_work = work;
+        }
     }
     return best;
 }

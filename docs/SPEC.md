@@ -141,7 +141,7 @@ The sweeps in 4.1, 4.2 and step 4 of 4.3 are the default `gs_lex` (lexicographic
   - Smoother: red–black Gauss–Seidel in colours `(I + J) mod 2` (global level indices), `mg_pre` = `mg_post` = 2 sweeps.
   - Coarsest level: remove the mean of `b`, sweep until `||r|| < 1e-10 ||b||` or 200 sweeps, remove the mean of `x`.
   - Determinism: all sums run in a fixed order (row sums, then rows serially).
-  - MPI: the interior is split in units of `2^D` cells, so levels `0..D-1` are decomposed with rank boundaries between 2 × 2 blocks (halo exchange after each smoother colour and after prolongation). Level `D` is gathered onto every rank, which runs the remaining levels and the coarse solve redundantly. `D` is the deepest level at which every rank still owns at least 4 cells per side on level `D-1`.
+  - MPI: the interior is split in units of `2^D` cells, so levels `0..D-1` are decomposed with rank boundaries between 2 × 2 blocks (halo exchange after each smoother colour and after prolongation). Level `D` is gathered onto every rank, which runs the remaining levels and the coarse solve redundantly. `D` is chosen among the levels at which every rank still owns at least 4 cells per side on level `D-1`: the one with the least per-rank work, counting the largest rank's level-0 cells plus level `D`'s cells (ties go to the larger `D`). Coarse units leave the level-0 blocks uneven, since every rank waits for the largest one; fine units make the gathered level bigger.
 
 ## 5. Stopping rule
 

@@ -95,10 +95,12 @@ static Params mg_grid(int nx, int ny, const std::string& mpi_grid) {
 
 TEST_CASE("decompose: mg splits in aligned units and picks the decomposed levels") {
     // 32x40: levels 32x40, 16x20, 8x10, 4x5. 3x1: units of 4 rows -> 12 / 12 / 8 interior rows;
-    // a rank keeps >= 4 cells per side on level split-1.
+    // a rank keeps >= 4 cells per side on level split-1. 2x2: split 3 is valid but gives 16x24
+    // blocks (40 = 5 units of 8 over 2 columns), split 2 even 16x20 blocks for a level of 8x10
+    // cells instead of 4x5: 320 + 80 < 384 + 20, so 2.
     struct Case {
         int R, C, split;
-    } cases[] = {{3, 1, 2}, {2, 2, 3}, {4, 1, 2}, {1, 4, 2}, {6, 1, 1}, {2, 3, 2}};
+    } cases[] = {{3, 1, 2}, {2, 2, 2}, {4, 1, 2}, {1, 4, 2}, {6, 1, 1}, {2, 3, 2}};
     for (const Case& c : cases) {
         const Params g = mg_grid(32, 40, std::to_string(c.R) + "x" + std::to_string(c.C));
         std::vector<int> rows;

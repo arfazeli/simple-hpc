@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=4
 #SBATCH --mem-per-cpu=2G
-#SBATCH --time=00:30:00
+#SBATCH --time=01:00:00
 #SBATCH --output=bench/slurm/logs/%x-%j.out
 # Build with MPI, run the fast tests, then the MPI byte-identity test across two nodes: fields and
 # residual history on 2 and 4 ranks (1 and 2 per node, 1 and 4 OpenMP threads) must match one rank.
