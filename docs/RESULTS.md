@@ -364,31 +364,32 @@ Coloured sweeps post non-blocking, corner-free halo messages for the previous co
 
 The gain needs blocks large enough for the interior update to cover the message time (512² cells per rank at 4096², 128² at 1024²). Kept: it never measurably costs time and results stay byte-identical.
 
-### Scaling on up to 4 nodes (T46)
+### Scaling on up to 8 nodes (T46)
 
-nibi CPU nodes: 2 × Intel Xeon 6972P, 192 cores and 6 NUMA domains (SNC3) per node, whole nodes (`--exclusive`), GCC 12.3, Open MPI 4.1.5. Cavity Re1000, QUICK/4, `gs_multicolour` + `mg`, fixed iterations (4096² × 100, 8192² × 50, weak 2048² per node × 200), `write_fields = False`, halo overlap on. Two layouts: **hybrid** (one rank per NUMA domain, 32 OpenMP threads each, `OMP_PLACES=cores OMP_PROC_BIND=close`) and **pure MPI** (one rank per core). Median of 3; repeats within a job agree to a few percent. Jobs 27660679–27660681 at c6c50f1 (`bench/slurm/mpi_scaling.sbatch`, figures from `postprocess/plot_mpi.py`). The 8-node job is still queued.
+nibi CPU nodes: 2 × Intel Xeon 6972P, 192 cores and 6 NUMA domains (SNC3) per node, whole nodes (`--exclusive`), GCC 12.3, Open MPI 4.1.5. Cavity Re1000, QUICK/4, `gs_multicolour` + `mg`, fixed iterations (4096² × 100, 8192² × 50, weak 2048² per node × 200), `write_fields = False`, halo overlap on. Two layouts: **hybrid** (one rank per NUMA domain, 32 OpenMP threads each, `OMP_PLACES=cores OMP_PROC_BIND=close`) and **pure MPI** (one rank per core). Median of 3; repeats within a job agree to a few percent. Jobs 27660679–27660682 at c6c50f1 (`bench/slurm/mpi_scaling.sbatch`, figures from `postprocess/plot_mpi.py`).
 
 **Strong scaling** (solver seconds):
 
-| grid | layout | 1 node | 2 nodes | 4 nodes | speedup at 4 |
+| grid | layout | 1 node | 2 nodes | 4 nodes | 8 nodes | speedup at 4 / 8 |
+|---|---|---|---|---|---|---|
+| 4096² | hybrid (6 × 32) | 5.82 | 3.05 | 1.29 | 1.05 | **4.5× / 5.6×** |
+| 4096² | pure MPI (192 × 1) | 6.31 | 3.18 | 1.53 | 1.80 | 4.1× / 3.5× |
+| 8192² | hybrid | 18.35 | 8.62 | 3.43 | 1.99 | **5.3× / 9.2×** |
+| 8192² | pure MPI | 18.43 | 9.59 | 3.66 | 2.43 | 5.0× / 7.6× |
+
+**Weak scaling** (2048² cells per node: 2048², 4096 × 2048, 4096², 8192 × 4096):
+
+| layout | 1 node | 2 nodes | 4 nodes | 8 nodes | efficiency at 2 / 4 / 8 |
 |---|---|---|---|---|---|
-| 4096² | hybrid (6 × 32) | 5.82 | 3.05 | 1.29 | **4.5×** |
-| 4096² | pure MPI (192 × 1) | 6.31 | 3.18 | 1.53 | 4.1× |
-| 8192² | hybrid | 18.35 | 8.62 | 3.43 | **5.3×** |
-| 8192² | pure MPI | 18.43 | 9.59 | 3.66 | 5.0× |
-
-**Weak scaling** (2048² cells per node: 2048², 4096 × 2048, 4096²):
-
-| layout | 1 node | 2 nodes | 4 nodes | efficiency at 2 / 4 |
-|---|---|---|---|---|
-| hybrid | 1.98 s | 2.17 s | 2.41 s | **91 % / 82 %** |
-| pure MPI | 1.83 s | 2.23 s | 2.99 s | 82 % / 61 % |
+| hybrid | 1.98 s | 2.17 s | 2.41 s | 2.80 s | **91 % / 82 % / 71 %** |
+| pure MPI | 1.83 s | 2.23 s | 2.99 s | 4.29 s | 82 % / 61 % / 43 % |
 
 ![MPI strong scaling](figures/performance/mpi/mpi_strong.png)
 ![MPI weak scaling](figures/performance/mpi/mpi_weak.png)
 
-- **Superlinear strong scaling comes from per-node problem size, not from the code beating ideal.** The cost per cell per iteration on a node falls as its share of the grid shrinks: 5.5 ns at 67M cells per node (8192², 1 node), 3.5 ns at 17M (4096², 1 node). 8192² on 4 nodes has the same 17M cells per node and costs 4.1 ns; the 0.6 ns difference is communication. The same effect as the cache-resident grids in T36.
-- **Hybrid wins, and the margin grows with node count.** Pure MPI's collectives (row-sum reductions and the multigrid coarse-level gather, which every rank receives in full) grow with the rank count: at 4 nodes they take 31 % of the 8192² time with 768 ranks against 14 % with 24 hybrid ranks, and 46 % of the pure-MPI weak-scaling time.
+- **Superlinear strong scaling comes from per-node problem size, not from the code beating ideal.** The cost per cell per iteration on a node falls as its share of the grid shrinks: 5.5 ns at 67M cells per node (8192², 1 node), 3.5 ns at 17M (4096², 1 node). 8192² on 4 nodes has the same 17M cells per node and costs 4.1 ns; the 0.6 ns difference is communication. On 8 nodes (8.4M cells per node) it costs 4.7 ns against 3.6 ns for 4096² on 2 nodes at the same size, so communication has grown to 1.1 ns. The same effect as the cache-resident grids in T36.
+- **Hybrid wins, and the margin grows with node count.** Pure MPI's collectives (row-sum reductions and the multigrid coarse-level gather, which every rank receives in full) grow with the rank count: at 4 nodes they take 31 % of the 8192² time with 768 ranks against 14 % with 24 hybrid ranks, and at 8 nodes 48 % with 1536 ranks against 19 % with 48. They are 56 % of the 8-node pure-MPI weak-scaling time.
+- **Pure MPI stops scaling at 4096² beyond 4 nodes**: 1.53 s on 4 nodes, 1.80 s on 8. With 1536 ranks the collectives take 1.33 s of the 1.80 s (74 %); hybrid with 48 ranks spends 0.26 s and is 1.7× faster. Hybrid 4096² is also near its limit on 8 nodes (5.6×): each rank holds 350K cells and unhidden halo time is 0.43 s of 1.05 s.
 - **Run-to-run variation between jobs is larger than within a job.** Pure-MPI cases whose decomposition did not change between the two scaling jobs moved by up to 11 % (weak, 1 node: 1.64 → 1.83 s), presumably from different node allocations. Differences under about 10 % between separate jobs are not significant.
 
 ### Balanced multigrid split: diagnosing halo wait (T46)
@@ -410,5 +411,5 @@ Each rank times its halo exchanges (blocking exchange, post and wait: with overl
 
 ![Time split at 8192²](figures/performance/mpi/mpi_comm.png)
 
-- Hybrid 8192²: compute 93 % on one node (halo 4 %, collectives 3 %), 72 % on four (halo 15 %, collectives 14 %). That is real communication growing with node count now, not idle time.
-- **Ping-pong between two nodes** (`bench/mpi_pingpong.cpp`): 2.4 µs latency, 24 GB/s bandwidth. A 2-cell-deep halo row message at 8192² on 4 nodes (32 KB) should cost about 4 µs, yet the halo time is about 10 ms per outer iteration. Each iteration makes many small exchanges (one per colour per sweep and per multigrid level), so latency and synchronisation dominate, not bandwidth. Exchanges per iteration are not counted yet, so the per-iteration α–β prediction is still open.
+- Hybrid 8192²: compute 93 % on one node (halo 4 %, collectives 3 %), 72 % on four (halo 15 %, collectives 14 %), 56 % on eight (halo 24 %, collectives 19 %). That is real communication growing with node count now, not idle time. Pure MPI on 8 nodes is down to 40 % compute.
+- **Ping-pong between two nodes** (`bench/mpi_pingpong.cpp`): 2.4 µs latency, 24 GB/s bandwidth, the same in the 2-, 4- and 8-node jobs. A 2-cell-deep halo row message at 8192² on 4 nodes (32 KB) should cost about 4 µs, yet the halo time is about 10 ms per outer iteration. Each iteration makes many small exchanges (one per colour per sweep and per multigrid level), so latency and synchronisation dominate, not bandwidth. Exchanges per iteration are not counted yet, so the per-iteration α–β prediction is still open.
